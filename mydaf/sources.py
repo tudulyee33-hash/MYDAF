@@ -214,13 +214,20 @@ def decode_google_news_url(url: str) -> str:
         ts = re.search(r'data-n-a-ts="([^"]+)"', page)
         if not (sig and ts):
             return ""
+        aid = re.search(r'data-n-a-id="([^"]+)"', page)
+        art = aid.group(1) if aid else art_id
         inner = ["garturlreq", [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None,
                                  None, 0, 1], "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
-                 art_id, int(ts.group(1)), sig.group(1)]
-        freq = json.dumps([[["Fa2Xvd", json.dumps(inner), None, "generic"]]])
-        r = HTTP.post("https://news.google.com/_/DotsSplashUi/data/batchexecute",
-                      data={"f.req": freq}, timeout=TIMEOUT,
-                      headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+                 art, int(ts.group(1)), sig.group(1)]
+        r = None
+        for freq in (json.dumps([[["Fa2Xvd", json.dumps(inner)]]]),
+                     json.dumps([[["Fa2Xvd", json.dumps(inner), None, "generic"]]])):
+            r = HTTP.post("https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                          data={"f.req": freq}, timeout=TIMEOUT,
+                          headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                                   "Referer": "https://news.google.com/"})
+            if r.status_code == 200:
+                break
         r.raise_for_status()
         payload = json.loads(r.text.split("\n\n", 1)[1])
         found = json.loads(payload[0][2])[1]
