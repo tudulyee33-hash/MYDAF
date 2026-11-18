@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.5.5"
+VERSION = "1.5.6"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -541,17 +541,21 @@ class App:
                  )
         autowrap(safe_lab).pack(fill="x", padx=20, pady=(0, 16))
 
-        # 오른쪽 아래: 원클릭 자동 등록
-        one = card(right, "원클릭 자동 등록")
-        one.pack(side="bottom", fill="x", pady=(20, 0))
+        # 오른쪽 아래 고정: 원클릭 자동 등록 (스크롤과 상관없이 항상 보이게 창 오른쪽 아래에 띄움)
+        tk.Frame(right, bg=C["bg"], height=250).pack(fill="x")      # 떠 있는 카드에 가리지 않게 자리 비움
+        one = tk.Frame(self.main, bg=C["card"], highlightthickness=2, highlightbackground=C["primary"])
+        one.place(relx=1.0, rely=1.0, anchor="se", x=-40, y=-20, width=330)
+        tk.Label(one, text="원클릭 자동 등록", bg=C["card"], fg=C["text"], font=F(12, "bold"),
+                 anchor="w").pack(fill="x", padx=20, pady=(14, 4))
         mode = "임시저장" if self.cfg.publish_mode == "draft" else "바로 발행"
         self.one_desc = tk.Label(one, justify="left", anchor="w", bg=C["card"], fg=C["muted"], font=F(9),
-                                 wraplength=250)
-        autowrap(self.one_desc).pack(fill="x", padx=20)
+                                 wraplength=285)
+        self.one_desc.pack(fill="x", padx=20)
         tk.Label(one, text=f"다 쓰면: {mode}", bg=C["card"], fg=C["text"], font=F(9, "bold"),
                  anchor="w").pack(fill="x", padx=20, pady=(6, 0))
-        self.big_btn = Btn(one, "▶  자동 등록 시작", self.on_toggle, size=12, pady=14)
-        self.big_btn.pack(fill="x", padx=20, pady=(12, 20))
+        self.big_btn = Btn(one, "▶  자동 등록 시작", self.on_toggle, size=13, pady=16)
+        self.big_btn.pack(fill="x", padx=20, pady=(10, 18))
+        one.lift()
         self._refresh_home()
 
     # ------------------------------------------------------------ 진행 카드 (작성 중 / 끝난 글 / 기록)
