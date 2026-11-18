@@ -21,7 +21,9 @@ LOGIN_URL = "https://nid.naver.com/nidlogin.login?url=https%3A%2F%2Fblog.naver.c
 SELECTORS = {
     "frame": "#mainFrame",
     "title": ".se-documentTitle .se-text-paragraph",
-    "body": ".se-main-container .se-component.se-text .se-text-paragraph",
+    # 2026-11 에디터 개편으로 .se-main-container 가 .se-components-wrap 으로 바뀜 (둘 다 지원)
+    "body": (".se-components-wrap .se-component.se-text .se-text-paragraph, "
+             ".se-main-container .se-component.se-text .se-text-paragraph"),
     "popup_cancel": ".se-popup-button-cancel",          # '작성 중인 글이 있습니다' → 취소(새로 쓰기)
     "help_close": ".se-help-panel-close-button",
     "popup_close": ".se-popup-close-button",
@@ -35,9 +37,9 @@ SELECTORS = {
     "tag_input": "#tag-input",
     "quote_btn": "button[data-name='quotation'], .se-quotation-toolbar-button, .se-insert-quotation-default-toolbar-button",
     "quote_opt": "button[data-name='quotation'][data-value], .se-toolbar-option-insert-quotation-quotation_line-button",
-    "quote_comp": ".se-main-container .se-component.se-quotation",
+    "quote_comp": ".se-components-wrap .se-component.se-quotation, .se-main-container .se-component.se-quotation",
     "image_btn": "button[data-name='image'], .se-image-toolbar-button",
-    "image_comp": ".se-main-container .se-component.se-image",
+    "image_comp": ".se-components-wrap .se-component.se-image, .se-main-container .se-component.se-image",
     "category_btn": "[data-click-area='tpb*i.category']",
 }
 
@@ -199,8 +201,19 @@ class NaverBlog:
         return self._focus_after(f, p, SELECTORS["image_comp"])
 
     # ------------------------------------------------------------ 글쓰기
-    def write(self, title: str, blocks: list[dict], tags: list[str], mode: str = "draft",
+    def write(self, title: str, blocks: list[dict], tags: list[str], mode="draft",
               category: str = "", shot_dir: Path | None = None, on_progress=lambda frac, msg: None) -> dict:
+        try:
+            return self._write(title, blocks, tags, mode, category, shot_dir, on_progress)
+        except Exception:
+            if shot_dir:      # 어디서 막혔는지 볼 수 있게 실패한 순간의 화면을 남긴다
+                try:
+                    self.page().screenshot(path=str(Path(shot_dir) / "error.png"), full_page=True)
+                except Exception:
+                    pass
+            raise
+
+    def _write(self, title, blocks, tags, mode, category, shot_dir, on_progress) -> dict:
         p = self.page()
         on_progress(0.0, "에디터 여는 중")
         p.goto(f"https://blog.naver.com/{self.blog_id}?Redirect=Write")

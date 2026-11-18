@@ -27,7 +27,7 @@ EDITOR = """<html><body>
  <button data-click-area="tpb.save" onclick="log.push('save')">저장</button>
 </div>
 <div class="se-documentTitle"><p class="se-text-paragraph" contenteditable="true" id="title"></p></div>
-<div class="se-main-container" id="main"></div>
+<article class="se-components-wrap" id="main"></article>
 <script>
  var log=[], main=document.getElementById('main'), last=null;
  function textComp(){const d=document.createElement('div');d.className='se-component se-text';
