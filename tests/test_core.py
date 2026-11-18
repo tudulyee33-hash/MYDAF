@@ -88,7 +88,7 @@ def test_google_news_rss_parsing():
 def test_kiss_parsing():
     data = {"code": "200", "resultList": [
         {"AKEYN": 2688024, "TLKO": "초고층 건물 <!HS>구급대<!HE> 수직이송시간", "AUTH": "홍길동", "AYEAR": "2008",
-         "VOL1": "12", "NUM1": "3", "PNMEK": "한국화재소방학회", "KAST": "초록 내용입니다. " * 10, "KEYW": "초고층"},
+         "VOL1": "12", "NUM1": "3", "PNMEK": "한국화재소방학회", "KAST": "초록 내용입니다. " * 20, "KEYW": "초고층"},
         {"AKEYN": "", "TLKO": "키 없음"}, {"AKEYN": 5, "TLKO": "초록 없음", "KAST": ""}]}
     items = sources.parse_kiss_data(data, 5)
     assert len(items) == 1 and items[0].url == "https://kiss.kstudy.com/Detail/Ar?key=2688024"
