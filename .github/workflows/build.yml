@@ -1,0 +1,39 @@
+name: Windows 실행파일 빌드
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+      - name: 테스트
+        run: |
+          python -c "import mydaf.gui"
+          pytest -q tests
+      - name: 실행파일 만들기
+        run: pyinstaller --noconfirm --onefile --windowed --name MYDAF --collect-all playwright run_mydaf.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MYDAF-windows
+          path: dist/MYDAF.exe
+      - name: 릴리스 (v 태그일 때)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MYDAF.exe

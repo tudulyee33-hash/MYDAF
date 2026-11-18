@@ -1,0 +1,5 @@
+anthropic>=2.10
+playwright>=1.48
+requests>=2.32
+feedparser>=6.0
+beautifulsoup4>=4.12

@@ -1,0 +1,282 @@
+"""글감 수집: 뉴스, 구글, RSS, KISS, 학회.
+
+모든 수집기는 Source 목록을 돌려준다. 각 Source 에는 원문(가능하면 본문 전체)이 들어가며,
+이후 검증 단계에서 '인용문이 실제 원문에 있는지'를 확인하는 데 쓰인다.
+"""
+from __future__ import annotations
+
+import html
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from typing import Callable
+from urllib.parse import quote, urljoin, urlparse
+
+import feedparser
+import requests
+from bs4 import BeautifulSoup
+
+from .logs import log
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+TIMEOUT = 15
+MAX_TEXT = 12000
+
+
+@dataclass
+class Source:
+    kind: str                 # news | google | rss | kiss | society
+    title: str
+    url: str
+    publisher: str = ""
+    published: str = ""
+    text: str = ""            # 검증에 쓰는 원문 텍스트
+    id: str = ""              # S1, S2 ... (수집 후 부여)
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def domain(self) -> str:
+        host = urlparse(self.url).netloc.lower()
+        return host[4:] if host.startswith("www.") else host
+
+    @property
+    def outlet(self) -> str:
+        """독립성 판단 기준(매체). 구글 뉴스는 링크가 news.google.com 이라 원 매체 주소를 쓴다."""
+        site = self.meta.get("publisher_site", "")
+        if site:
+            host = urlparse(site).netloc.lower()
+            return host[4:] if host.startswith("www.") else host
+        if self.domain in ("news.google.com", "") and self.publisher:
+            return self.publisher.strip().lower()
+        return self.domain
+
+
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.6"})
+    return s
+
+
+HTTP = _session()
+
+
+def clean(text: str) -> str:
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _date(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return parsedate_to_datetime(value).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return value[:10]
+
+
+def extract_article_text(page_html: str) -> str:
+    """기사/페이지 HTML에서 본문 텍스트만 추린다."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form", "iframe"]):
+        tag.decompose()
+    candidates = soup.select("article, #articleBodyContents, #dic_area, #newsct_article, .article_body, "
+                             ".news_body, #articeBody, .article-body, main")
+    root = max(candidates, key=lambda n: len(n.get_text()), default=soup.body or soup)
+    paras = [p.get_text(" ", strip=True) for p in root.find_all(["p", "li", "h2", "h3"])]
+    text = " ".join(p for p in paras if len(p) > 20)
+    if len(text) < 200:
+        text = root.get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", text)[:MAX_TEXT]
+
+
+def fetch_text(url: str) -> str:
+    try:
+        r = HTTP.get(url, timeout=TIMEOUT)
+        if r.status_code != 200 or "html" not in r.headers.get("content-type", "html"):
+            return ""
+        r.encoding = r.apparent_encoding if r.encoding in (None, "ISO-8859-1") else r.encoding
+        return extract_article_text(r.text)
+    except requests.RequestException as e:
+        log.info("본문 가져오기 실패 %s: %s", url, e)
+        return ""
+
+
+# ---------------------------------------------------------------- 뉴스
+def naver_news(query: str, client_id: str, client_secret: str, limit: int) -> list[Source]:
+    """네이버 검색 API(뉴스). developers.naver.com 에서 무료 발급."""
+    if not (client_id and client_secret):
+        return []
+    r = HTTP.get("https://openapi.naver.com/v1/search/news.json",
+                 params={"query": query, "display": min(limit * 2, 50), "sort": "sim"},
+                 headers={"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret},
+                 timeout=TIMEOUT)
+    r.raise_for_status()
+    out = []
+    for item in r.json().get("items", [])[:limit]:
+        url = item.get("originallink") or item.get("link")
+        out.append(Source("news", clean(item.get("title", "")), url,
+                          publisher=urlparse(url).netloc, published=_date(item.get("pubDate", "")),
+                          text=clean(item.get("description", ""))))
+    return out
+
+
+def parse_google_news_rss(xml: str, limit: int) -> list[Source]:
+    feed = feedparser.parse(xml)
+    out = []
+    for e in feed.entries[:limit]:
+        publisher = getattr(getattr(e, "source", None), "title", "") or ""
+        title = clean(e.get("title", ""))
+        if publisher and title.endswith(" - " + publisher):
+            title = title[: -len(publisher) - 3]
+        src_url = getattr(getattr(e, "source", None), "href", "") or ""
+        out.append(Source("news", title, e.get("link", ""), publisher=publisher,
+                          published=_date(e.get("published", "")), text=clean(e.get("summary", "")),
+                          meta={"publisher_site": src_url}))
+    return out
+
+
+def google_news(query: str, limit: int) -> list[Source]:
+    url = f"https://news.google.com/rss/search?q={quote(query)}&hl=ko&gl=KR&ceid=KR:ko"
+    r = HTTP.get(url, timeout=TIMEOUT)
+    r.raise_for_status()
+    return parse_google_news_rss(r.text, limit)
+
+
+# ---------------------------------------------------------------- 구글 검색
+def google_search(query: str, api_key: str, cx: str, limit: int) -> list[Source]:
+    """Google Programmable Search JSON API (키가 있을 때만)."""
+    if not (api_key and cx):
+        return []
+    r = HTTP.get("https://www.googleapis.com/customsearch/v1",
+                 params={"key": api_key, "cx": cx, "q": query, "num": min(limit, 10), "lr": "lang_ko"},
+                 timeout=TIMEOUT)
+    r.raise_for_status()
+    return [Source("google", clean(i.get("title", "")), i.get("link", ""),
+                   publisher=i.get("displayLink", ""), text=clean(i.get("snippet", "")))
+            for i in r.json().get("items", [])[:limit]]
+
+
+# ---------------------------------------------------------------- RSS / 학회
+def rss(feed_url: str, query: str, limit: int, kind: str = "rss") -> list[Source]:
+    feed = feedparser.parse(HTTP.get(feed_url, timeout=TIMEOUT).content)
+    words = [w for w in re.split(r"\s+", query.lower()) if len(w) > 1]
+    out = []
+    for e in feed.entries:
+        blob = (e.get("title", "") + " " + e.get("summary", "")).lower()
+        if words and not any(w in blob for w in words):
+            continue
+        out.append(Source(kind, clean(e.get("title", "")), e.get("link", ""),
+                          publisher=clean(feed.feed.get("title", "")) or urlparse(feed_url).netloc,
+                          published=_date(e.get("published", "") or e.get("updated", "")),
+                          text=clean(e.get("summary", ""))))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def society(url: str, query: str, limit: int) -> list[Source]:
+    """학회 사이트: RSS면 RSS로, 일반 페이지면 제목에 키워드가 들어간 링크를 찾는다."""
+    r = HTTP.get(url, timeout=TIMEOUT)
+    ctype = r.headers.get("content-type", "")
+    if "xml" in ctype or r.text.lstrip().startswith("<?xml") or "<rss" in r.text[:500]:
+        return rss(url, query, limit, kind="society")
+    soup = BeautifulSoup(r.text, "html.parser")
+    site = clean(soup.title.get_text()) if soup.title else urlparse(url).netloc
+    words = [w for w in re.split(r"\s+", query) if len(w) > 1]
+    out, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        title = clean(a.get_text())
+        if len(title) < 6 or not any(w in title for w in words):
+            continue
+        link = urljoin(url, a["href"])
+        if link in seen:
+            continue
+        seen.add(link)
+        out.append(Source("society", title, link, publisher=site))
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ---------------------------------------------------------------- KISS
+def parse_kiss_results(page_html: str, limit: int) -> list[Source]:
+    """KISS(한국학술정보) 검색 결과 파싱. 논문 본문은 유료이므로 제목·저자·학회지·초록만 쓴다."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    out, seen = [], set()
+    for a in soup.select("a[href*='Detail/Ar'], a[href*='detail/ar'], a[href*='DetailOa/Ar']"):
+        link = urljoin("https://kiss.kstudy.com/", a["href"])
+        title = clean(a.get_text())
+        if not title or link in seen:
+            continue
+        seen.add(link)
+        box = a.find_parent(["li", "tr", "div"])
+        info = clean(box.get_text(" ")) if box else title
+        out.append(Source("kiss", title, link, publisher="KISS 한국학술정보", text=info[:1500]))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def kiss(query: str, limit: int) -> list[Source]:
+    r = HTTP.get("https://kiss.kstudy.com/Search/Results", params={"query": query}, timeout=TIMEOUT)
+    r.raise_for_status()
+    items = parse_kiss_results(r.text, limit)
+    for s in items:   # 상세 페이지의 초록
+        try:
+            d = BeautifulSoup(HTTP.get(s.url, timeout=TIMEOUT).text, "html.parser")
+            abstract = d.select_one(".abstract, #abstract, [class*='abstract'], [class*='Abstract']")
+            if abstract:
+                s.text = clean(abstract.get_text(" "))[:MAX_TEXT]
+            meta = {m.get("name"): m.get("content") for m in d.find_all("meta") if m.get("name")}
+            s.meta.update({k: meta[k] for k in ("citation_author", "citation_journal_title",
+                                                 "citation_publication_date") if meta.get(k)})
+            s.published = (s.meta.get("citation_publication_date") or "")[:10]
+        except requests.RequestException:
+            pass
+    return items
+
+
+# ---------------------------------------------------------------- 전체 수집
+def collect(query: str, cfg, progress: Callable[[str], None] = lambda m: None) -> list[Source]:
+    n = cfg.max_items_per_source
+    jobs: list[tuple[str, Callable[[], list[Source]]]] = [
+        ("네이버 뉴스", lambda: naver_news(query, cfg.naver_client_id, cfg.naver_client_secret, n)),
+        ("구글 뉴스", lambda: google_news(query, n)),
+        ("구글 검색", lambda: google_search(query, cfg.google_api_key, cfg.google_cx, n)),
+    ]
+    jobs += [(f"RSS {u}", (lambda u=u: rss(u, query, n))) for u in cfg.rss_feeds]
+    jobs += [(f"학회 {u}", (lambda u=u: society(u, query, n))) for u in cfg.society_sources]
+    if cfg.use_kiss:
+        jobs.append(("KISS", lambda: kiss(query, min(n, 4))))
+
+    found: list[Source] = []
+    for name, job in jobs:
+        try:
+            got = job()
+            progress(f"  · {name}: {len(got)}건")
+            found += got
+        except Exception as e:  # 출처 하나가 실패해도 나머지는 계속
+            progress(f"  · {name}: 실패 ({e.__class__.__name__})")
+            log.warning("수집 실패 %s: %s", name, e)
+
+    # 중복 제거 + 본문 보강
+    unique, seen = [], set()
+    for s in found:
+        key = s.url.split("?")[0] if s.kind != "news" else s.title
+        if not s.url or key in seen:
+            continue
+        seen.add(key)
+        unique.append(s)
+    for s in unique:
+        if s.kind in ("news", "google", "rss", "society") and len(s.text) < 600:
+            body = fetch_text(s.url)
+            if len(body) > len(s.text):
+                s.text = body
+    for i, s in enumerate(unique, 1):
+        s.id = f"S{i}"
+        if not s.published:
+            s.published = ""
+    progress(f"  → 자료 {len(unique)}건 확보 ({datetime.now():%H:%M})")
+    return unique
