@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 
 
 def citation_line(n: int, s) -> str:
@@ -15,19 +16,27 @@ def citation_line(n: int, s) -> str:
     return f"[{n}] " + ", ".join(parts) + f" {s.url}"
 
 
-def to_blocks(post: dict, cited: list, align: str = "right", font_size: int = 11) -> list[dict]:
+def to_blocks(post: dict, cited: list, align: str = "right", font_size: int = 11,
+              images: list | None = None, heading_size: int = 34, body_size: int = 30,
+              heading_style: str = "quote") -> list[dict]:
+    """에디터 입력 순서. images[i] 는 i번째 소제목 아래에 들어간다 (None 이면 생략)."""
+    images = images or []
     blocks: list[dict] = []
     if post.get("intro"):
-        blocks.append({"type": "para", "text": post["intro"]})
-    for sec in post["sections"]:
-        blocks.append({"type": "heading", "text": sec["heading"]})
+        blocks.append({"type": "para", "text": post["intro"], "size": body_size})
+    for i, sec in enumerate(post["sections"]):
+        blocks.append({"type": "heading", "text": sec["heading"], "size": heading_size, "style": heading_style})
+        pic = images[i] if i < len(images) else None
+        if pic:
+            blocks.append({"type": "image", "path": pic.path})
         for p in sec["paragraphs"]:
-            blocks.append({"type": "para", "text": p["text"]})
+            blocks.append({"type": "para", "text": p["text"], "size": body_size})
     if post.get("conclusion"):
-        blocks.append({"type": "para", "text": post["conclusion"]})
-    if cited:
-        lines = ["출처"] + [citation_line(i, s) for i, s in enumerate(cited, 1)]
-        blocks.append({"type": "citations", "lines": lines, "align": align, "size": font_size})
+        blocks.append({"type": "para", "text": post["conclusion"], "size": body_size})
+    lines = [citation_line(i, s) for i, s in enumerate(cited, 1)]
+    lines += [f"[사진] {pic.credit}" for pic in images if pic]
+    if lines:
+        blocks.append({"type": "citations", "lines": ["출처"] + lines, "align": align, "size": font_size})
     return blocks
 
 
@@ -37,7 +46,9 @@ def preview_html(title: str, blocks: list[dict], tags: list[str]) -> str:
            f"<h1>{html.escape(title)}</h1>"]
     for b in blocks:
         if b["type"] == "heading":
-            out.append(f"<h2>{html.escape(b['text'])}</h2>")
+            out.append(f"<h2 style='border-left:4px solid #2563EB;padding-left:12px'>{html.escape(b['text'])}</h2>")
+        elif b["type"] == "image":
+            out.append(f"<p><img src='images/{html.escape(Path(b['path']).name)}' style='max-width:100%'></p>")
         elif b["type"] == "para":
             out.append(f"<p>{html.escape(b['text'])}</p>")
         else:

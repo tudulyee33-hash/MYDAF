@@ -58,6 +58,7 @@ POST_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "heading": {"type": "string"},
+                    "image_query": {"type": "string"},
                     "paragraphs": {
                         "type": "array",
                         "items": {
@@ -73,7 +74,7 @@ POST_SCHEMA = {
                         },
                     },
                 },
-                "required": ["heading", "paragraphs"],
+                "required": ["heading", "image_query", "paragraphs"],
                 "additionalProperties": False,
             },
         },
@@ -107,7 +108,16 @@ WRITE_SYSTEM = """당신은 네이버 블로그 전문 작가입니다. 검증�
   숫자·날짜·기관명을 구체적으로 쓰고, 같은 말 반복·뻔한 일반론·AI 티 나는 상투어("~에 대해 알아보겠습니다",
   "결론적으로", "다양한") 를 피하고, 문단마다 새로운 정보가 있어야 합니다.
 - 출처 표기는 프로그램이 따로 붙이니 본문에 URL이나 '출처:'를 쓰지 마세요.
-- tags 는 5~10개, # 없이."""
+- tags 는 5~10개, # 없이.
+- 소제목마다 image_query 에 그 내용을 보여줄 사진 검색어를 영어 2~4단어로 (예: "skyscraper construction site").
+  인물 사진·로고·특정 상표가 나오지 않는 일반적인 장면으로."""
+
+STYLES = {
+    "정보 전달형 전문가": "해당 분야 실무 전문가가 핵심만 정확하게 정리해 주는 말투. 존댓말, 군더더기 없이.",
+    "트렌드 관찰형": "업계 흐름을 꾸준히 지켜본 관찰자가 변화의 맥락과 의미를 짚어 주는 말투. 존댓말.",
+    "친근한 이웃형": "블로그 이웃에게 설명하듯 쉽고 따뜻한 말투. 어려운 용어는 풀어서. 존댓말.",
+    "분석 리포트형": "숫자와 근거를 앞세운 보고서형 말투. 비교·원인·영향을 구조적으로 정리. 존댓말.",
+}
 
 
 REVISE_SYSTEM = """당신은 깐깐한 블로그 편집장입니다. 초안을 검토해 더 좋은 최종본을 같은 JSON 형식으로 돌려줍니다.
@@ -128,12 +138,14 @@ class Writer:
 
 
 class ClaudeWriter(Writer):
-    def __init__(self, api_key: str, model: str = "claude-opus-5-5", effort: str = "high"):
+    def __init__(self, api_key: str, model: str = "claude-opus-5-5", effort: str = "high",
+                 style: str = "정보 전달형 전문가"):
         if not api_key:
             raise ValueError("Claude API 키가 비어 있습니다. 설정에서 입력하세요.")
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3)
         self.model = model
         self.effort = effort
+        self.style = STYLES.get(style, STYLES["정보 전달형 전문가"])
 
     def _json(self, system: str, user: str, schema: dict) -> dict:
         kwargs = dict(
@@ -179,16 +191,16 @@ class ClaudeWriter(Writer):
     def write_post(self, topic: str, facts: list[dict]) -> dict:
         user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
                 "\n\n이 사실만으로 글을 써 주세요.")
-        return self._json(WRITE_SYSTEM, user, POST_SCHEMA)
+        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}", user, POST_SCHEMA)
 
     def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict:
         user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
                 f"\n\n<draft>\n{json.dumps(draft, ensure_ascii=False)}\n</draft>\n\n"
                 "초안을 점검하고 고친 최종본을 주세요.")
-        return self._json(WRITE_SYSTEM + "\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)
+        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)
 
 
 def make_writer(cfg) -> Writer:
     if cfg.ai_provider == "claude":
-        return ClaudeWriter(cfg.anthropic_api_key, cfg.model, cfg.effort)
+        return ClaudeWriter(cfg.anthropic_api_key, cfg.model, cfg.effort, cfg.writer_style)
     raise ValueError(f"지원하지 않는 AI 공급자: {cfg.ai_provider}")

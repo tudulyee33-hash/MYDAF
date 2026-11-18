@@ -52,15 +52,25 @@ def create_desktop_shortcut(target: Path, name: str = SHORTCUT_NAME) -> str:
     return out.stdout.strip()
 
 
+def installed_exe() -> Path:
+    return install_dir() / "MYDAF.exe"
+
+
+def running_installed() -> bool:
+    try:
+        return Path(sys.executable).resolve() == installed_exe().resolve()
+    except OSError:
+        return False
+
+
 def install_and_shortcut() -> str:
-    """실행 중인 exe 를 고정 위치로 복사(필요 시)하고 바탕화면 바로가기를 만든다. 바로가기 경로 반환."""
+    """실행 중인 exe 를 고정 위치로 복사(새 버전이면 교체)하고 바탕화면 바로가기를 만든다. 바로가기 경로 반환."""
     if not is_frozen_windows():
         raise RuntimeError("Windows용 MYDAF.exe 에서만 바탕화면 아이콘을 만들 수 있습니다.")
     me = Path(sys.executable).resolve()
-    dest_dir = install_dir()
-    dest = dest_dir / "MYDAF.exe"
-    if not dest.exists() or me != dest.resolve():
-        dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = installed_exe()
+    if not running_installed():
+        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.copy2(me, dest)
         except PermissionError:
@@ -69,14 +79,30 @@ def install_and_shortcut() -> str:
     return create_desktop_shortcut(dest)
 
 
-def first_run_setup(flag_dir: Path) -> str | None:
-    """처음 한 번만 자동으로 바탕화면 아이콘을 만든다. 만들었으면 경로, 아니면 None."""
-    flag = flag_dir / "desktop_shortcut_done"
-    if flag.exists() or not is_frozen_windows():
+def startup_check(flag_dir: Path) -> dict | None:
+    """프로그램을 켤 때마다 호출.
+    - 다운로드한 MYDAF.exe 를 실행한 경우: 설치 위치로 복사(업데이트 포함)하고 바탕화면 아이콘을 그 복사본에 연결.
+      → {"shortcut": 경로, "original": 원본 exe} 를 돌려주면 화면에서 '원본 정리'를 물어본다.
+    - 설치된 MYDAF 를 처음 실행한 경우: 아이콘이 없으면 한 번 만든다.
+    """
+    if not is_frozen_windows():
         return None
+    flag = flag_dir / "desktop_shortcut_done"
     try:
-        path = install_and_shortcut()
+        if not running_installed():
+            path = install_and_shortcut()
+            flag.write_text(path, encoding="utf-8")
+            return {"shortcut": path, "original": str(Path(sys.executable).resolve())}
+        if not flag.exists():
+            flag.write_text(install_and_shortcut(), encoding="utf-8")
     except Exception:
         return None
-    flag.write_text(path, encoding="utf-8")
-    return path
+    return None
+
+
+def handoff_and_remove_original(original: str) -> None:
+    """설치된 MYDAF 를 실행하고, 이 프로그램이 닫힌 뒤 원본 exe 를 지운다 (바탕화면에 아이콘 하나만 남김)."""
+    subprocess.Popen([str(installed_exe())], cwd=str(install_dir()),
+                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    subprocess.Popen(["cmd", "/c", f'ping -n 4 127.0.0.1 >nul & del /f /q "{original}"'],
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

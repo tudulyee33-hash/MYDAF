@@ -12,13 +12,17 @@ import threading
 from datetime import date, datetime, timedelta
 from typing import Callable
 
-from . import ai, render, sources, topics, verify
+import time
+
+from . import ai, images, render, sources, topics, verify
 from .config import Config
 from .logs import add_history, log, post_folder, read_history, record_reasoning, save_json
 
 # 네이버 에디터까지 도달한 시도 = 하루 한도에 포함
 COUNTED = {"published", "draft", "unknown", "draft_failed", "naver_error"}
 POST_LOCK = threading.Lock()          # 동시에 두 편이 올라가지 않게
+STEPS = ["자료 수집", "사실 검증", "원고 작성", "이미지 준비", "에디터 작성", "저장 확인"]
+STEP_PCT = [(0, 15), (15, 30), (30, 55), (55, 65), (65, 95), (95, 100)]
 
 
 class Runner:
@@ -30,10 +34,24 @@ class Runner:
         self.state = "idle"          # idle | running | waiting | stopping
         self.last_result: dict = {}
         self.next_gap_minutes: int | None = None
+        self.job: dict | None = None      # 화면에 보여줄 현재 작업 진행 상황
+
+    def step(self, idx: int, frac: float = 0.0, msg: str = ""):
+        """진행 단계 갱신 (화면의 단계 표시·진행률 막대용)."""
+        if self.job is None:
+            return
+        lo, hi = STEP_PCT[idx]
+        self.job.update(step=idx, pct=int(lo + (hi - lo) * max(0.0, min(frac, 1.0))))
+        if msg:
+            self.job["events"].append((datetime.now().strftime("%H:%M:%S"), msg))
+            self.job["events"] = self.job["events"][-50:]
 
     def say(self, msg: str):
         log.info(msg)
         self._say(msg)
+        if self.job and not self.job.get("done"):
+            self.job["events"].append((datetime.now().strftime("%H:%M:%S"), msg.strip()))
+            self.job["events"] = self.job["events"][-50:]
 
     # ------------------------------------------------------------ 제어
     @property
@@ -141,13 +159,24 @@ class Runner:
         cfg = self.cfg
         post_id, folder = post_folder(topic)
         record = {"time": datetime.now().isoformat(timespec="seconds"), "post_id": post_id, "topic": topic}
+        self.job = {"topic": topic, "step": 0, "pct": 0, "started": time.time(), "events": [], "done": False}
         try:
+            return self._one_inner(topic, writer, post_id, folder, record)
+        finally:
+            if self.job:
+                self.job["done"] = True
+
+    def _one_inner(self, topic, writer, post_id, folder, record) -> dict:
+        cfg = self.cfg
+        try:
+            self.step(0, 0, "자료 수집을 시작합니다")
             self.say(f"[{topic}] 자료 수집")
             srcs = sources.collect(topic, cfg, self.say)
             save_json(folder, "1_sources.json", [s.__dict__ for s in srcs])
             if len({s.outlet for s in srcs}) < cfg.min_independent_sources:
                 return self._skip(record, "독립 출처 부족")
 
+            self.step(1, 0, f"자료 {len(srcs)}건 확보 · 사실 추출과 교차 검증 중")
             self.say(f"[{topic}] 사실 추출")
             extracted = writer.extract_facts(topic, srcs)
             checked = verify.verify_facts(extracted, srcs, cfg.min_independent_sources, cfg.allow_single_source)
@@ -157,9 +186,11 @@ class Runner:
             if len(checked["usable"]) < cfg.min_verified_facts:
                 return self._skip(record, f"검증된 사실 {len(checked['usable'])}개 (최소 {cfg.min_verified_facts})")
 
+            self.step(2, 0, f"검증 통과 사실 {len(checked['usable'])}개 · 원고 작성 중")
             self.say(f"[{topic}] 글 작성")
             draft = writer.write_post(topic, checked["usable"])
             save_json(folder, "3a_draft.json", draft)
+            self.step(2, 0.5, "편집장 검토·수정 중")
             self.say(f"[{topic}] 자체 검토·수정")
             post = writer.revise_post(topic, checked["usable"], draft)
             review = verify.check_draft(post, checked["usable"])
@@ -173,7 +204,16 @@ class Runner:
             if chars < cfg.min_post_chars:
                 return self._skip(record, f"본문 {chars}자 (최소 {cfg.min_post_chars}자) → 품질 미달")
 
-            blocks = render.to_blocks(post, cited, cfg.citation_align, cfg.citation_font_size)
+            pics = []
+            if cfg.use_images:
+                self.step(3, 0, "이미지 준비 중 (자유 라이선스)")
+                self.say(f"[{topic}] 이미지 준비")
+                pics = images.prepare([s.get("image_query", "") or topic for s in post["sections"]],
+                                      folder / "images", cfg, self.say)
+            self.step(3, 1, f"이미지 {sum(1 for x in pics if x)}장 준비됨")
+            blocks = render.to_blocks(post, cited, cfg.citation_align, cfg.citation_font_size, images=pics,
+                                      heading_size=cfg.heading_font_size, body_size=cfg.body_font_size,
+                                      heading_style=cfg.heading_style)
             (folder / "preview.html").write_text(render.preview_html(post["title"], blocks, post["tags"]),
                                                  encoding="utf-8")
             return self._post(record, folder, post, blocks, checked, review, cited)
@@ -195,10 +235,13 @@ class Runner:
             record["time"] = datetime.now().isoformat(timespec="seconds")
             from .naver import NaverBlog
             try:
-                with NaverBlog(cfg.naver_blog_id, cfg.browser_channel) as nb:
+                self.step(4, 0, "네이버 편집기에 작성 중 · 창을 닫지 마세요")
+                with NaverBlog(cfg.naver_blog_id, cfg.browser_channel, headless=not cfg.show_browser) as nb:
                     if not nb.is_logged_in():
-                        return self._skip(record, "네이버 로그인 필요 (실행 탭 → 네이버 로그인)", status="error")
-                    res = nb.write(post["title"], blocks, post["tags"], cfg.publish_mode, cfg.category, folder)
+                        return self._skip(record, "네이버 로그인 필요 (바로 시작 → 네이버 로그인 확인)", status="error")
+                    res = nb.write(post["title"], blocks, post["tags"], cfg.publish_mode, cfg.category, folder,
+                                   on_progress=lambda frac, msg: self.step(4, frac))
+                self.step(5, 1, "저장 확인 완료" if res["status"] in ("published", "draft") else "저장 확인 필요")
             except Exception as e:
                 log.exception("네이버 작성 실패")
                 # 에디터까지 갔으므로 하루 한도에 포함 (중복·과다 발행 방지)

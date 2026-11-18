@@ -1,4 +1,4 @@
-"""MYDAF 화면 (tkinter). 원클릭 시작/정지 + 설정."""
+"""MYDAF 화면 (tkinter). 사이드바 + 카드형 홈, 오른쪽 아래 원클릭 자동 등록, 최초 1회 설정 마법사."""
 from __future__ import annotations
 
 import os
@@ -6,221 +6,859 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
+import webbrowser
+from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import messagebox
 
 from . import install
-from .config import Config, app_dir
+from .config import HARD_DAILY_MAX, MIN_INTERVAL_FLOOR, Config, app_dir
+from .logs import POST_DIR, read_history
 from .remote import RemoteControl
-from .runner import Runner
+from .runner import COUNTED, Runner
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
-# (설정키, 화면 이름, 종류)  종류: str | secret | int | bool | lines | choice:a,b
-TABS = {
-    "기본": [
-        ("anthropic_api_key", "Claude API 키", "secret"),
-        ("model", "AI 모델", "choice:claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5"),
-        ("naver_blog_id", "네이버 블로그 ID", "str"),
-        ("publish_mode", "발행 방식 (draft=임시저장, publish=바로 발행)", "choice:draft,publish"),
-        ("category", "카테고리 이름 (비우면 기본)", "str"),
-        ("browser_channel", "사용할 브라우저", "choice:msedge,chrome"),
-        ("daily_limit", "하루 최대 글 수 (최대 3, 넘길 수 없음)", "choice:1,2,3"),
-        ("interval_min_minutes", "글 사이 최소 간격(분, 180 이상)", "int"),
-        ("interval_max_minutes", "글 사이 최대 간격(분)", "int"),
-        ("active_start_hour", "글 올리는 시작 시각(시)", "int"),
-        ("active_end_hour", "글 올리는 종료 시각(시)", "int"),
-    ],
-    "키워드": [
-        ("keywords", "키워드 (한 줄에 하나, 개수·길이 제한 없음)", "lines"),
-        ("use_google_trends", "구글 트렌드에서 주제 자동 발굴", "bool"),
-        ("topic_cooldown_days", "같은 주제 재사용 금지 기간(일)", "int"),
-    ],
-    "자료 출처": [
-        ("naver_client_id", "네이버 검색 API Client ID (선택)", "str"),
-        ("naver_client_secret", "네이버 검색 API Client Secret (선택)", "secret"),
-        ("google_api_key", "Google 검색 API 키 (선택)", "secret"),
-        ("google_cx", "Google 검색엔진 ID cx (선택)", "str"),
-        ("rss_feeds", "RSS 주소 (한 줄에 하나)", "lines"),
-        ("society_sources", "학회 RSS 또는 게시판 주소 (한 줄에 하나)", "lines"),
-        ("use_kiss", "KISS 학술논문 검색 사용", "bool"),
-        ("max_items_per_source", "출처별 최대 자료 수", "int"),
-    ],
-    "검증·출처표기": [
-        ("min_independent_sources", "사실 1개당 필요한 서로 다른 매체 수", "int"),
-        ("allow_single_source", "1곳만 확인된 사실도 사용", "bool"),
-        ("min_verified_facts", "글을 쓰기 위한 최소 검증 사실 수", "int"),
-        ("min_post_chars", "최소 본문 글자 수 (미달 시 올리지 않음)", "int"),
-        ("citation_align", "출처 위치", "choice:right,left"),
-        ("citation_font_size", "출처 글자 크기", "choice:11,13"),
-    ],
-    "원격 제어": [
-        ("remote_enabled", "내 서버에서 원격 제어 허용", "bool"),
-        ("remote_url", "서버 주소 (https://...)", "str"),
-        ("remote_token", "접속 토큰", "secret"),
-        ("remote_poll_seconds", "확인 주기(초)", "int"),
-    ],
+# ------------------------------------------------------------------ 디자인
+C = {
+    "bg": "#F5F7FB", "side": "#FFFFFF", "card": "#FFFFFF", "line": "#E5E7EB",
+    "text": "#111827", "muted": "#6B7280", "faint": "#9CA3AF",
+    "primary": "#2563EB", "primary_dk": "#1D4ED8", "primary_bg": "#EFF6FF",
+    "ok": "#10B981", "ok_bg": "#ECFDF5", "warn": "#D97706", "warn_bg": "#FFFBEB",
+    "bad": "#DC2626", "bad_bg": "#FEF2F2", "hover": "#F3F4F6", "sel": "#EEF2FF",
+}
+FONT = "Malgun Gothic" if sys.platform == "win32" else "NanumGothic"
+
+
+def F(size=10, weight="normal"):
+    return (FONT, size, weight)
+
+
+STATUS_CHIP = {
+    "published": ("발행", C["ok"], C["ok_bg"]), "draft": ("임시저장", C["primary_dk"], C["primary_bg"]),
+    "skipped": ("건너뜀", C["muted"], C["hover"]), "blocked": ("보류", C["warn"], C["warn_bg"]),
+    "error": ("오류", C["bad"], C["bad_bg"]), "naver_error": ("오류", C["bad"], C["bad_bg"]),
+    "unknown": ("확인 필요", C["warn"], C["warn_bg"]), "draft_failed": ("저장 실패", C["bad"], C["bad_bg"]),
 }
 
+# (설정키, 화면 이름, 종류, 도움말)  종류: str | secret | int | bool | lines | choice:a,b
+PAGES = {
+    "keywords": ("키워드", [
+        ("keywords", "키워드", "lines", "한 줄에 하나씩. 개수·길이 제한 없음"),
+        ("use_google_trends", "구글 트렌드에서 주제 자동 발굴", "bool", "오늘 뜨는 검색어 중 내 키워드와 관련된 것을 우선"),
+        ("topic_cooldown_days", "같은 주제 재사용 금지(일)", "int", "최근에 쓴 주제는 이 기간 동안 다시 쓰지 않음"),
+    ]),
+    "writing": ("글쓰기 설정", [
+        ("writer_style", "작가 스타일", "choice:정보 전달형 전문가,트렌드 관찰형,친근한 이웃형,분석 리포트형", "글의 말투와 구성"),
+        ("heading_style", "소제목 모양", "choice:quote,bold", "quote = 인용구 박스, bold = 굵은 글씨"),
+        ("heading_font_size", "소제목 글자 크기", "choice:19,24,28,30,34,38", "기본 34"),
+        ("body_font_size", "본문 글자 크기", "choice:15,16,19,24,28,30", "기본 30"),
+        ("use_images", "이미지 자동 준비", "bool", "소제목마다 자유 라이선스 사진을 찾아 넣고 출처에 표기"),
+        ("images_per_post", "글 하나당 최대 이미지 수", "int", ""),
+        ("pexels_api_key", "Pexels API 키", "secret", "선택 · pexels.com 무료 발급, 없으면 위키미디어 공용 사용"),
+        ("show_browser", "작성 중 블로그 화면 보이기", "bool", "끄면 화면 없이 뒤에서 작성"),
+    ]),
+    "sources": ("자료 출처", [
+        ("rss_feeds", "RSS 주소", "lines", "한 줄에 하나"),
+        ("society_sources", "학회 RSS · 게시판 주소", "lines", "한 줄에 하나"),
+        ("use_kiss", "KISS 학술논문 검색", "bool", "논문 초록과 서지 정보만 인용"),
+        ("naver_client_id", "네이버 검색 API Client ID", "str", "선택 · developers.naver.com 무료 발급"),
+        ("naver_client_secret", "네이버 검색 API Secret", "secret", "선택"),
+        ("google_api_key", "Google 검색 API 키", "secret", "선택 · 없으면 구글 뉴스만 사용"),
+        ("google_cx", "Google 검색엔진 ID (cx)", "str", "선택"),
+        ("max_items_per_source", "출처별 최대 자료 수", "int", ""),
+    ]),
+    "quality": ("검증 · 출처 표기", [
+        ("min_independent_sources", "사실 1개당 필요한 매체 수", "int", "서로 다른 매체에서 확인돼야 사용"),
+        ("allow_single_source", "1곳만 확인된 사실도 사용", "bool", "끄는 것을 권장"),
+        ("min_verified_facts", "최소 검증 사실 수", "int", "미달이면 그 주제는 쓰지 않음"),
+        ("min_post_chars", "최소 본문 글자 수", "int", "미달이면 올리지 않음"),
+        ("citation_align", "출처 위치", "choice:right,left", "글 맨 아래 작은 글씨"),
+        ("citation_font_size", "출처 글자 크기", "choice:11,13", ""),
+    ]),
+    "publish": ("발행 설정", [
+        ("anthropic_api_key", "Claude API 키", "secret", "console.anthropic.com 에서 발급"),
+        ("model", "AI 모델", "choice:claude-opus-5-5,claude-sonnet-5-5", "Opus 가 가장 고품질"),
+        ("naver_blog_id", "네이버 블로그 ID", "str", "blog.naver.com/ 뒤의 아이디"),
+        ("publish_mode", "발행 방식", "choice:draft,publish", "draft = 임시저장, publish = 바로 발행"),
+        ("category", "카테고리", "str", "비우면 기본 카테고리"),
+        ("browser_channel", "사용할 브라우저", "choice:msedge,chrome", ""),
+        ("daily_limit", f"하루 최대 글 수", "choice:1,2,3", f"최대 {HARD_DAILY_MAX}개 고정"),
+        ("interval_min_minutes", "글 사이 최소 간격(분)", "int", f"{MIN_INTERVAL_FLOOR}분 이상"),
+        ("interval_max_minutes", "글 사이 최대 간격(분)", "int", ""),
+        ("active_start_hour", "올리는 시작 시각(시)", "int", ""),
+        ("active_end_hour", "올리는 종료 시각(시)", "int", ""),
+        ("auto_start", "프로그램을 켜면 자동 등록 바로 시작", "bool", ""),
+    ]),
+    "remote": ("원격 제어", [
+        ("remote_enabled", "내 서버에서 원격 제어 허용", "bool", "기본 꺼짐 · 업데이트 명령은 없음"),
+        ("remote_url", "서버 주소", "str", "https://..."),
+        ("remote_token", "접속 토큰", "secret", "서버와 같은 값"),
+        ("remote_poll_seconds", "확인 주기(초)", "int", ""),
+    ]),
+}
 
+NAV = [
+    (None, [("home", "홈", "⌂"), ("history", "작업 기록", "☰")]),
+    ("자동 등록 설정", [("keywords", "키워드", "#"), ("writing", "글쓰기 설정", "¶"), ("sources", "자료 출처", "◎"),
+                   ("quality", "검증 · 출처 표기", "✓"), ("publish", "발행 설정", "✎")]),
+    ("연결", [("remote", "원격 제어", "⇄")]),
+]
+
+
+# ------------------------------------------------------------------ 작은 부품
+class Btn(tk.Label):
+    """평평한 버튼 (Windows/리눅스에서 같은 모양)."""
+
+    def __init__(self, parent, text, command, kind="primary", size=10, padx=16, pady=8, **kw):
+        styles = {
+            "primary": (C["primary"], "white", C["primary_dk"]),
+            "soft": (C["primary_bg"], C["primary_dk"], "#DBEAFE"),
+            "ghost": (C["card"], C["primary_dk"], C["hover"]),
+            "danger": (C["bad_bg"], C["bad"], "#FEE2E2"),
+        }
+        self.bg, fg, self.hover = styles[kind]
+        super().__init__(parent, text=text, bg=self.bg, fg=fg, font=F(size, "bold"),
+                         padx=padx, pady=pady, cursor="hand2", **kw)
+        self.command = command
+        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Enter>", lambda e: self.configure(bg=self.hover))
+        self.bind("<Leave>", lambda e: self.configure(bg=self.bg))
+
+    def restyle(self, text, kind):
+        styles = {"primary": (C["primary"], "white", C["primary_dk"]), "danger": (C["bad_bg"], C["bad"], "#FEE2E2")}
+        self.bg, fg, self.hover = styles[kind]
+        self.configure(text=text, bg=self.bg, fg=fg)
+
+
+def card(parent, title=None, link=None, link_cmd=None):
+    outer = tk.Frame(parent, bg=C["card"], highlightthickness=1, highlightbackground=C["line"])
+    if title:
+        head = tk.Frame(outer, bg=C["card"])
+        head.pack(fill="x", padx=20, pady=(16, 8))
+        tk.Label(head, text=title, bg=C["card"], fg=C["text"], font=F(12, "bold")).pack(side="left")
+        if link:
+            lab = tk.Label(head, text=link, bg=C["card"], fg=C["primary_dk"], font=F(9), cursor="hand2")
+            lab.pack(side="right")
+            lab.bind("<Button-1>", lambda e: link_cmd())
+    return outer
+
+
+def chip(parent, text, fg, bg):
+    return tk.Label(parent, text=text, fg=fg, bg=bg, font=F(9, "bold"), padx=8, pady=2)
+
+
+def autowrap(label):
+    """라벨 폭에 맞춰 자동 줄바꿈."""
+    label.bind("<Configure>", lambda e: label.configure(wraplength=max(e.width - 4, 50)))
+    return label
+
+
+def hline(parent):
+    tk.Frame(parent, bg=C["line"], height=1).pack(fill="x")
+
+
+class ScrollPage(tk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent, bg=C["bg"])
+        self.canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0)
+        bar = tk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = tk.Frame(self.canvas, bg=C["bg"])
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        self.canvas.configure(yscrollcommand=bar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+
+# ------------------------------------------------------------------ 앱
 class App:
     def __init__(self):
         self.cfg = Config.load()
         self.msgs: queue.Queue[str] = queue.Queue()
+        self.log_lines: list[str] = []
         self.runner = Runner(self.cfg, self.msgs.put)
         self.remote = RemoteControl(self.cfg, self.runner, self.msgs.put)
-        self.root = tk.Tk()
-        self.root.title(f"MYDAF {VERSION} · 로컬 네이버 블로그 자동 포스팅")
-        self.root.geometry("900x680")
         self.vars: dict[str, object] = {}
+        self.login_state = "확인 전"
+
+        self.root = tk.Tk()
+        self.root.title("MYDAF")
+        self.root.geometry("1240x800")
+        self.root.minsize(1080, 700)
+        self.root.configure(bg=C["bg"])
         self._set_icon()
-        self._build()
+
+        self.side = tk.Frame(self.root, bg=C["side"], width=232, highlightthickness=1,
+                             highlightbackground=C["line"])
+        self.side.pack(side="left", fill="y")
+        self.side.pack_propagate(False)
+        self.main = tk.Frame(self.root, bg=C["bg"])
+        self.main.pack(side="left", fill="both", expand=True)
+
+        self.nav_items: dict[str, tuple[tk.Frame, list[tk.Label]]] = {}
+        self._build_sidebar()
+        self.current = None
+        if self.cfg.setup_done and self.cfg.anthropic_api_key:
+            self.show("home")
+        else:
+            self.show_setup()
+
         self.remote.start()
-        made = install.first_run_setup(app_dir())
-        if made:
-            self.msgs.put(f"바탕화면에 MYDAF 아이콘을 만들었습니다: {made}")
+        self.root.after(400, self._startup_install)
+        if self.cfg.auto_start and self.cfg.setup_done:
+            self.root.after(1500, self.on_toggle)
         self.root.after(300, self._pump)
 
+    # ------------------------------------------------------------ 공통
     def _set_icon(self):
         base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
-        ico = base / "assets" / "mydaf.ico"
         try:
-            if ico.exists() and sys.platform == "win32":
-                self.root.iconbitmap(default=str(ico))
+            if sys.platform == "win32" and (base / "assets/mydaf.ico").exists():
+                self.root.iconbitmap(default=str(base / "assets/mydaf.ico"))
+            elif (base / "assets/mydaf.png").exists():
+                self._icon_img = tk.PhotoImage(file=str(base / "assets/mydaf.png")).subsample(16)
+                self.root.iconphoto(True, self._icon_img)
         except tk.TclError:
             pass
 
-    # ------------------------------------------------------------ 화면 구성
-    def _build(self):
-        nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+    def _logo(self, parent, bg):
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+        try:
+            self._logo_img = tk.PhotoImage(file=str(base / "assets/mydaf.png")).subsample(24)
+            return tk.Label(parent, image=self._logo_img, bg=bg)
+        except tk.TclError:
+            return tk.Label(parent, text="M", bg=C["primary"], fg="white", font=F(14, "bold"), width=3)
 
-        run = ttk.Frame(nb)
-        nb.add(run, text="실행")
-        bar = ttk.Frame(run)
-        bar.pack(fill="x", pady=6)
-        self.start_btn = ttk.Button(bar, text="▶ 원클릭 연속 실행", command=self.on_start)
-        self.start_btn.pack(side="left", padx=4)
-        ttk.Button(bar, text="■ 정지", command=self.on_stop).pack(side="left", padx=4)
-        ttk.Button(bar, text="한 편만 실행", command=self.on_once).pack(side="left", padx=4)
-        ttk.Button(bar, text="네이버 로그인", command=self.on_login).pack(side="left", padx=12)
-        ttk.Button(bar, text="기록 폴더 열기", command=self.on_open_folder).pack(side="left", padx=4)
-        ttk.Button(bar, text="바탕화면 아이콘 만들기", command=self.on_shortcut).pack(side="left", padx=4)
-        self.status = tk.StringVar(value="대기 중")
-        ttk.Label(run, textvariable=self.status).pack(anchor="w", padx=6)
-        self.log = scrolledtext.ScrolledText(run, height=30, state="disabled", font=("Malgun Gothic", 10))
-        self.log.pack(fill="both", expand=True, padx=4, pady=4)
+    def _startup_install(self):
+        info = install.startup_check(app_dir())
+        if not info:
+            return
+        self.msgs.put(f"바탕화면 MYDAF 아이콘을 연결했습니다: {info['shortcut']}")
+        if messagebox.askyesno(
+                "바탕화면 정리",
+                "바탕화면 MYDAF 아이콘을 설치된 프로그램에 연결했어요.\n\n"
+                f"지금 실행한 원본 파일은 지우고 아이콘 하나만 남길까요?\n({info['original']})"):
+            install.handoff_and_remove_original(info["original"])
+            self.root.destroy()
 
-        for tab, items in TABS.items():
-            frame = ttk.Frame(nb)
-            nb.add(frame, text=tab)
-            for row, (key, label, kind) in enumerate(items):
-                ttk.Label(frame, text=label).grid(row=row, column=0, sticky="nw", padx=8, pady=5)
-                self._field(frame, key, kind).grid(row=row, column=1, sticky="we", padx=8, pady=5)
-            frame.columnconfigure(1, weight=1)
-            ttk.Button(frame, text="저장", command=self.on_save).grid(row=len(items), column=1, sticky="e", padx=8, pady=10)
+    def clear_main(self):
+        for w in self.main.winfo_children():
+            w.destroy()
+        self.vars.clear()
+
+    def header(self, title, right_widgets=True):
+        bar = tk.Frame(self.main, bg=C["card"], height=72, highlightthickness=1, highlightbackground=C["line"])
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text=title, bg=C["card"], fg=C["text"], font=F(16, "bold")).pack(side="left", padx=28)
+        if right_widgets:
+            self.head_btn = Btn(bar, "한 편 바로 쓰기", self.on_head_button, padx=18, pady=9)
+            self.head_btn.pack(side="right", padx=(8, 24))
+            self.view_btn = Btn(bar, "", self.on_toggle_view, kind="soft", size=9, padx=14, pady=8)
+            self.view_btn.pack(side="right", padx=4)
+            self.login_pill = tk.Label(bar, bg=C["hover"], font=F(9, "bold"), padx=12, pady=6)
+            self.login_pill.pack(side="right", padx=8)
+            self.login_pill.bind("<Button-1>", lambda e: self.on_login())
+            self._refresh_header()
+        return bar
+
+    def _refresh_header(self):
+        if not getattr(self, "login_pill", None) or not self.login_pill.winfo_exists():
+            return
+        ok = self.login_state == "됨"
+        self.login_pill.configure(text=("● 네이버 로그인됨" if ok else f"● 네이버 로그인 {self.login_state}"),
+                                  fg=C["ok"] if ok else C["muted"], bg=C["ok_bg"] if ok else C["hover"])
+        self.view_btn.configure(text=("▣ 블로그 화면 보기 켜짐" if self.cfg.show_browser else "▢ 블로그 화면 숨김"))
+        if self.runner.running or (self.runner.job and not self.runner.job.get("done")):
+            self.head_btn.restyle("멈추기", "danger")
+        else:
+            self.head_btn.restyle("한 편 바로 쓰기", "primary")
+
+    def on_head_button(self):
+        if self.runner.running:
+            self.on_toggle()
+        elif not (self.runner.job and not self.runner.job.get("done")):
+            self.on_once()
+
+    def on_toggle_view(self):
+        self.cfg.show_browser = not self.cfg.show_browser
+        self.cfg.save()
+        self.msgs.put("작성 중 블로그 화면을 " + ("보여줘요." if self.cfg.show_browser else "숨겨요 (뒤에서 작성)."))
+        self._refresh_header()
+
+    # ------------------------------------------------------------ 사이드바
+    def _build_sidebar(self):
+        top = tk.Frame(self.side, bg=C["side"])
+        top.pack(fill="x", padx=18, pady=(20, 14))
+        self._logo(top, C["side"]).pack(side="left")
+        txt = tk.Frame(top, bg=C["side"])
+        txt.pack(side="left", padx=10)
+        tk.Label(txt, text="MYDAF", bg=C["side"], fg=C["text"], font=F(13, "bold")).pack(anchor="w")
+        tk.Label(txt, text=f"블로그 자동 등록 {VERSION}", bg=C["side"], fg=C["muted"], font=F(9)).pack(anchor="w")
+
+        for section, items in NAV:
+            if section:
+                tk.Frame(self.side, bg=C["line"], height=1).pack(fill="x", padx=14, pady=(10, 0))
+                tk.Label(self.side, text=section, bg=C["side"], fg=C["faint"], font=F(9)).pack(
+                    anchor="w", padx=22, pady=(10, 4))
+            for key, label, icon in items:
+                row = tk.Frame(self.side, bg=C["side"], cursor="hand2")
+                row.pack(fill="x", padx=10, pady=1)
+                a = tk.Label(row, text=icon, bg=C["side"], fg=C["muted"], font=F(11), width=2)
+                a.pack(side="left", padx=(10, 6), pady=8)
+                b = tk.Label(row, text=label, bg=C["side"], fg=C["text"], font=F(10))
+                b.pack(side="left")
+                for w in (row, a, b):
+                    w.bind("<Button-1>", lambda e, k=key: self.show(k))
+                self.nav_items[key] = (row, [a, b])
+
+        bottom = tk.Frame(self.side, bg=C["side"])
+        bottom.pack(side="bottom", fill="x", padx=12, pady=14)
+        self.job_box = tk.Frame(bottom, bg=C["card"], highlightthickness=1, highlightbackground=C["line"])
+        jh = tk.Frame(self.job_box, bg=C["card"])
+        jh.pack(fill="x", padx=12, pady=(10, 0))
+        tk.Label(jh, text="● 지금 하는 작업", bg=C["card"], fg=C["primary_dk"], font=F(9, "bold")).pack(side="left")
+        self.job_pct = tk.Label(jh, bg=C["card"], fg=C["primary_dk"], font=F(9, "bold"))
+        self.job_pct.pack(side="right")
+        self.job_sub = tk.Label(self.job_box, bg=C["card"], fg=C["muted"], font=F(8), anchor="w")
+        self.job_sub.pack(fill="x", padx=12, pady=(2, 4))
+        self.job_bar = tk.Canvas(self.job_box, height=4, bg=C["line"], highlightthickness=0)
+        self.job_bar.pack(fill="x", padx=12, pady=(0, 10))
+        self.remote_box = tk.Frame(bottom, bg=C["card"], highlightthickness=1, highlightbackground=C["line"])
+        self.remote_box.pack(fill="x")
+        self.remote_lab = tk.Label(self.remote_box, bg=C["card"], fg=C["text"], font=F(9, "bold"), anchor="w")
+        self.remote_lab.pack(fill="x", padx=12, pady=(10, 0))
+        self.remote_sub = tk.Label(self.remote_box, bg=C["card"], fg=C["muted"], font=F(8), anchor="w")
+        self.remote_sub.pack(fill="x", padx=12, pady=(0, 10))
+        prof = tk.Frame(bottom, bg=C["side"])
+        prof.pack(fill="x", pady=(12, 0))
+        tk.Label(prof, text=(self.cfg.naver_blog_id or "?")[:1].upper(), bg=C["primary_bg"], fg=C["primary_dk"],
+                 font=F(10, "bold"), width=3, pady=4).pack(side="left")
+        info = tk.Frame(prof, bg=C["side"])
+        info.pack(side="left", padx=8)
+        self.prof_name = tk.Label(info, bg=C["side"], fg=C["text"], font=F(9, "bold"), anchor="w")
+        self.prof_name.pack(anchor="w")
+        self.prof_sub = tk.Label(info, bg=C["side"], fg=C["muted"], font=F(8), anchor="w")
+        self.prof_sub.pack(anchor="w")
+        gear = tk.Label(prof, text="⚙", bg=C["side"], fg=C["muted"], font=F(13), cursor="hand2")
+        gear.pack(side="right")
+        gear.bind("<Button-1>", lambda e: self.show("publish"))
+        self._refresh_side()
+
+    def _refresh_job_box(self):
+        job = self.runner.job
+        active = job and not job.get("done")
+        if active:
+            if not self.job_box.winfo_ismapped():
+                self.job_box.pack(fill="x", pady=(0, 10), before=self.remote_box)
+            from .runner import STEPS
+            self.job_pct.configure(text=f"{job['pct']}%")
+            self.job_sub.configure(text=f"{job['topic'][:14]} · {STEPS[job['step']]}")
+            w = max(self.job_bar.winfo_width(), 1)
+            self.job_bar.delete("all")
+            self.job_bar.create_rectangle(0, 0, w * job["pct"] / 100, 4, fill=C["primary"], width=0)
+        elif self.job_box.winfo_ismapped():
+            self.job_box.pack_forget()
+
+    def _refresh_side(self):
+        on = self.cfg.remote_enabled and self.cfg.remote_url
+        self.remote_lab.configure(text=("● 원격 제어 켜짐" if on else "● 원격 제어 꺼짐"),
+                                  fg=C["ok"] if on else C["faint"])
+        self.remote_sub.configure(text=(self.cfg.remote_url[:30] if on else "필요할 때 '원격 제어'에서 켜요"))
+        self.prof_name.configure(text=self.cfg.naver_blog_id or "블로그 미설정")
+        self.prof_sub.configure(text=f"네이버 로그인 {self.login_state}")
+
+    def _select_nav(self, key):
+        for k, (row, labels) in self.nav_items.items():
+            bg = C["sel"] if k == key else C["side"]
+            row.configure(bg=bg)
+            for lab in labels:
+                lab.configure(bg=bg)
+            labels[1].configure(font=F(10, "bold") if k == key else F(10),
+                                fg=C["primary_dk"] if k == key else C["text"])
+
+    def show(self, key):
+        self.current = key
+        self.clear_main()
+        self._select_nav(key)
+        if key == "home":
+            self.page_home()
+        elif key == "history":
+            self.page_history()
+        else:
+            self.page_form(key)
+
+    # ------------------------------------------------------------ 홈
+    def page_home(self):
+        self.header("홈")
+        body = tk.Frame(self.main, bg=C["bg"])
+        body.pack(fill="both", expand=True, padx=28, pady=24)
+        left = tk.Frame(body, bg=C["bg"])
+        left.pack(side="left", fill="both", expand=True)
+        right = tk.Frame(body, bg=C["bg"], width=330)
+        right.pack(side="left", fill="y", padx=(20, 0))
+        right.pack_propagate(False)
+
+        # 진행 상황
+        prog = card(left, "진행 상황", "전체 기록 보기", lambda: self.show("history"))
+        prog.pack(fill="x")
+        stats = tk.Frame(prog, bg=C["card"])
+        stats.pack(fill="x", padx=20, pady=(4, 12))
+        self.stat_vals = {}
+        for key, label in (("state", "상태"), ("today", "오늘 등록"), ("next", "다음 등록 가능"), ("kw", "키워드")):
+            box = tk.Frame(stats, bg=C["bg"], padx=14, pady=10)
+            box.pack(side="left", fill="x", expand=True, padx=(0, 10))
+            tk.Label(box, text=label, bg=C["bg"], fg=C["muted"], font=F(9)).pack(anchor="w")
+            v = tk.Label(box, text="-", bg=C["bg"], fg=C["text"], font=F(13, "bold"))
+            v.pack(anchor="w", pady=(2, 0))
+            self.stat_vals[key] = v
+        hline(prog)
+        self.job_area = tk.Frame(prog, bg=C["card"])
+        self.job_area.pack(fill="x")
+        self._job_area_mode = None
+        self._build_job_area()
+
+        # 최근 등록한 글
+        recent = card(left, "최근 작업", "기록 폴더 열기", self.on_open_folder)
+        recent.pack(fill="both", expand=True, pady=(20, 0))
+        hist = [h for h in reversed(read_history())][:5]
+        if not hist:
+            tk.Label(recent, text="아직 작업 기록이 없어요", bg=C["card"], fg=C["text"], font=F(10, "bold"),
+                     anchor="w").pack(fill="x", padx=20, pady=(10, 2))
+            tk.Label(recent, text="오른쪽 아래 '자동 등록 시작'을 누르면 여기에 쌓여요.", bg=C["card"],
+                     fg=C["muted"], font=F(9), anchor="w").pack(fill="x", padx=20, pady=(0, 16))
+        for i, h in enumerate(hist):
+            if i:
+                hline(recent)
+            self._history_row(recent, h)
+
+        # 오른쪽: 바로 시작
+        quick = card(right, "바로 시작")
+        quick.pack(fill="x")
+        for label, cmd in (("네이버 로그인 확인", self.on_login), ("키워드 관리", lambda: self.show("keywords")),
+                           ("기록 폴더 열기", self.on_open_folder),
+                           ("바탕화면 아이콘 만들기", self.on_shortcut)):
+            self._quick_row(quick, label, cmd)
+        tk.Frame(quick, bg=C["card"], height=10).pack()
+
+        # 오른쪽: 안전장치
+        safe = card(right, "안전장치")
+        safe.pack(fill="x", pady=(20, 0))
+        safe_lab = tk.Label(safe, justify="left", anchor="w", bg=C["card"], fg=C["muted"], font=F(9), wraplength=250,
+                 text=(f"하루 최대 {self.cfg.daily_limit}개 · 글 사이 {self.cfg.interval_min_minutes}~"
+                       f"{self.cfg.interval_max_minutes}분 · {self.cfg.active_start_hour}~{self.cfg.active_end_hour}시에만\n"
+                       f"검증된 사실 {self.cfg.min_verified_facts}개 이상, 본문 {self.cfg.min_post_chars}자 이상일 때만 등록")
+                 )
+        autowrap(safe_lab).pack(fill="x", padx=20, pady=(0, 16))
+
+        # 오른쪽 아래: 원클릭 자동 등록
+        one = card(right, "원클릭 자동 등록")
+        one.pack(side="bottom", fill="x")
+        mode = "임시저장" if self.cfg.publish_mode == "draft" else "바로 발행"
+        self.one_desc = tk.Label(one, justify="left", anchor="w", bg=C["card"], fg=C["muted"], font=F(9),
+                                 wraplength=250)
+        autowrap(self.one_desc).pack(fill="x", padx=20)
+        tk.Label(one, text=f"발행 방식: {mode}", bg=C["card"], fg=C["text"], font=F(9, "bold"),
+                 anchor="w").pack(fill="x", padx=20, pady=(6, 0))
+        self.big_btn = Btn(one, "▶  자동 등록 시작", self.on_toggle, size=12, pady=14)
+        self.big_btn.pack(fill="x", padx=20, pady=(12, 20))
+        self._refresh_home()
+
+    def _build_job_area(self):
+        job = self.runner.job
+        mode = "job" if (job and not job.get("done")) else "log"
+        if mode == self._job_area_mode:
+            return
+        self._job_area_mode = mode
+        for w in self.job_area.winfo_children():
+            w.destroy()
+        if mode == "log":
+            self.home_log = tk.Text(self.job_area, height=9, bg=C["card"], fg=C["text"], font=F(9), relief="flat",
+                                    padx=20, pady=12, wrap="word", state="disabled", highlightthickness=0)
+            self.home_log.pack(fill="x")
+            self.home_log.tag_configure("muted", foreground=C["muted"])
+            self._render_log(self.home_log, self.log_lines[-40:])
+            return
+        from .runner import STEPS
+        a = self.job_area
+        top = tk.Frame(a, bg=C["card"])
+        top.pack(fill="x", padx=20, pady=(14, 4))
+        tk.Label(top, text="●●● 자동 작성 중입니다", bg=C["card"], fg=C["primary_dk"], font=F(11, "bold")).pack(side="left")
+        self.job_elapsed = tk.Label(top, bg=C["card"], fg=C["muted"], font=F(9))
+        self.job_elapsed.pack(side="right")
+        self.job_topic = tk.Label(a, bg=C["card"], fg=C["text"], font=F(10, "bold"), anchor="w", justify="left")
+        autowrap(self.job_topic).pack(fill="x", padx=20)
+        note = tk.Label(a, text="네이버 편집기에 입력하는 동안에는 블로그 창을 닫지 마세요.", bg=C["warn_bg"],
+                        fg=C["warn"], font=F(9), anchor="w", padx=12, pady=8)
+        note.pack(fill="x", padx=20, pady=(8, 8))
+        pr = tk.Frame(a, bg=C["card"])
+        pr.pack(fill="x", padx=20)
+        self.job_stage = tk.Label(pr, bg=C["card"], fg=C["text"], font=F(10, "bold"))
+        self.job_stage.pack(side="left")
+        self.job_pct_big = tk.Label(pr, bg=C["card"], fg=C["primary_dk"], font=F(10, "bold"))
+        self.job_pct_big.pack(side="right")
+        self.job_bar_big = tk.Canvas(a, height=8, bg=C["line"], highlightthickness=0)
+        self.job_bar_big.pack(fill="x", padx=20, pady=(6, 10))
+        chips = tk.Frame(a, bg=C["card"])
+        chips.pack(fill="x", padx=20)
+        self.job_chips = []
+        for name in STEPS:
+            c = tk.Label(chips, text=name, font=F(9, "bold"), padx=10, pady=6)
+            c.pack(side="left", padx=(0, 6))
+            self.job_chips.append(c)
+        tl = tk.Frame(a, bg=C["bg"])
+        tl.pack(fill="x", padx=20, pady=(12, 16))
+        tk.Label(tl, text="작업 진행", bg=C["bg"], fg=C["primary_dk"], font=F(9, "bold")).pack(anchor="w", padx=12, pady=(8, 2))
+        self.job_timeline = tk.Text(tl, height=6, bg=C["bg"], fg=C["text"], font=F(9), relief="flat", padx=12,
+                                    pady=4, wrap="none", state="disabled", highlightthickness=0)
+        self.job_timeline.pack(fill="x")
+        self.job_timeline.tag_configure("t", foreground=C["muted"])
+
+    def _refresh_job_area(self):
+        if self.current != "home" or not getattr(self, "job_area", None) or not self.job_area.winfo_exists():
+            return
+        self._build_job_area()
+        job = self.runner.job
+        if self._job_area_mode != "job":
+            return
+        from .runner import STEPS
+        sec = int(time.time() - job["started"])
+        self.job_elapsed.configure(text=f"{sec // 60}분 {sec % 60:02d}초 경과")
+        self.job_topic.configure(text=job["topic"])
+        self.job_stage.configure(text=STEPS[job["step"]])
+        self.job_pct_big.configure(text=f"{job['pct']}%")
+        w = max(self.job_bar_big.winfo_width(), 1)
+        self.job_bar_big.delete("all")
+        self.job_bar_big.create_rectangle(0, 0, w * job["pct"] / 100, 8, fill=C["primary"], width=0)
+        for i, c in enumerate(self.job_chips):
+            if i < job["step"]:
+                c.configure(bg=C["primary_bg"], fg=C["primary_dk"], text="✓ " + STEPS[i])
+            elif i == job["step"]:
+                c.configure(bg=C["primary"], fg="white", text=STEPS[i])
+            else:
+                c.configure(bg=C["hover"], fg=C["muted"], text=STEPS[i])
+        tl = self.job_timeline
+        tl.configure(state="normal")
+        tl.delete("1.0", "end")
+        for t, m in job["events"][-6:]:
+            tl.insert("end", t + "  ", "t")
+            tl.insert("end", m[:80] + "\n")
+        tl.configure(state="disabled")
+
+    def _quick_row(self, parent, label, cmd):
+        row = tk.Frame(parent, bg=C["card"], highlightthickness=1, highlightbackground=C["line"], cursor="hand2")
+        row.pack(fill="x", padx=20, pady=5)
+        a = tk.Label(row, text=label, bg=C["card"], fg=C["text"], font=F(10), anchor="w")
+        a.pack(side="left", padx=14, pady=11)
+        b = tk.Label(row, text="›", bg=C["card"], fg=C["muted"], font=F(14))
+        b.pack(side="right", padx=12)
+        for w in (row, a, b):
+            w.bind("<Button-1>", lambda e: cmd())
+            w.bind("<Enter>", lambda e: [x.configure(bg=C["hover"]) for x in (row, a, b)])
+            w.bind("<Leave>", lambda e: [x.configure(bg=C["card"]) for x in (row, a, b)])
+
+    def _history_row(self, parent, h):
+        row = tk.Frame(parent, bg=C["card"])
+        row.pack(fill="x", padx=20, pady=10)
+        text, fg, bg = STATUS_CHIP.get(h.get("status"), (h.get("status", "?"), C["muted"], C["hover"]))
+        line1 = tk.Frame(row, bg=C["card"])
+        line1.pack(fill="x")
+        chip(line1, text, fg, bg).pack(side="left")
+        title = h.get("title") or h.get("topic", "")
+        tk.Label(line1, text=title[:46], bg=C["card"], fg=C["text"], font=F(10, "bold")).pack(side="left", padx=8)
+        when = h.get("time", "")[5:16].replace("T", " ")
+        if h.get("status") in COUNTED:
+            sub = f"{when} · 검증 사실 {h.get('facts', '-')}개 · 출처 {h.get('sources', '-')}곳 · 추론 {h.get('inferences', 0)}건"
+        else:
+            sub = f"{when} · {h.get('reason', '')}"
+        tk.Label(row, text=sub[:90], bg=C["card"], fg=C["muted"], font=F(9), anchor="w").pack(fill="x", pady=(4, 0))
+        btns = tk.Frame(line1, bg=C["card"])
+        btns.pack(side="right")
+        if h.get("url"):
+            Btn(btns, "글 보기", lambda u=h["url"]: webbrowser.open(u), kind="soft", size=9, padx=12, pady=5).pack(
+                side="left", padx=4)
+        folder = POST_DIR / h.get("post_id", "")
+        if h.get("post_id") and folder.exists():
+            Btn(btns, "자료·추론 보기", lambda f=folder: self._open_path(f), kind="ghost", size=9, padx=10,
+                pady=5).pack(side="left")
+
+    def _refresh_home(self):
+        if self.current != "home" or not hasattr(self, "big_btn"):
+            return
+        st = self.runner.status()
+        running = self.runner.running
+        names = {"idle": "대기 중", "running": "작성 중", "waiting": "다음 글 대기", "stopping": "멈추는 중"}
+        state = names.get(st["state"], st["state"])
+        if self.runner.job and not self.runner.job.get("done"):
+            state = "작성 중"
+        self.stat_vals["state"].configure(text=state, fg=C["primary_dk"] if running else C["text"])
+        self.stat_vals["today"].configure(text=f"{st['today']} / {st['daily_limit']}")
+        ok, reason, wait = self.runner.gate()
+        nxt = "지금 가능" if ok else (datetime.now() + timedelta(seconds=wait)).strftime("%m/%d %H:%M")
+        self.stat_vals["next"].configure(text=nxt)
+        self.stat_vals["kw"].configure(text=f"{len(self.cfg.keywords)}개")
+        if running:
+            self.big_btn.restyle("■  자동 등록 멈추기", "danger")
+            self.one_desc.configure(text="자동 등록이 켜져 있어요. 안전장치 기준에 맞춰 알아서 주제를 찾고, "
+                                         "검증하고, 써서 올려요. 이 창은 켜두세요.")
+        else:
+            self.big_btn.restyle("▶  자동 등록 시작", "primary")
+            self.one_desc.configure(text="한 번 누르면 주제 찾기 → 자료 수집 → 사실 검증 → 작성 → 네이버 등록을 "
+                                         "계속 반복해요. 설정은 처음 한 번만 하면 돼요.")
+        if hasattr(self, "head_status"):
+            self.head_status.configure(text=("● 자동 등록 중" if running else "● 대기 중"),
+                                       fg=C["ok"] if running else C["faint"])
+
+    # ------------------------------------------------------------ 작업 기록
+    def page_history(self):
+        self.header("작업 기록")
+        page = ScrollPage(self.main)
+        page.pack(fill="both", expand=True)
+        wrap = tk.Frame(page.inner, bg=C["bg"])
+        wrap.pack(fill="both", expand=True, padx=28, pady=24)
+        lst = card(wrap, "전체 작업", "기록 폴더 열기", self.on_open_folder)
+        lst.pack(fill="x")
+        hist = list(reversed(read_history()))[:100]
+        if not hist:
+            tk.Label(lst, text="아직 작업 기록이 없어요", bg=C["card"], fg=C["muted"], font=F(10)).pack(
+                anchor="w", padx=20, pady=(0, 16))
+        for i, h in enumerate(hist):
+            if i:
+                hline(lst)
+            self._history_row(lst, h)
+        logc = card(wrap, "실행 로그", "로그 파일 열기", lambda: self._open_path(app_dir() / "logs"))
+        logc.pack(fill="x", pady=(20, 0))
+        self.hist_log = tk.Text(logc, height=16, bg=C["card"], font=F(9), relief="flat", padx=20, pady=12,
+                                wrap="word", state="disabled", highlightthickness=0)
+        self.hist_log.pack(fill="x")
+        self._render_log(self.hist_log, self.log_lines[-300:])
+
+    # ------------------------------------------------------------ 설정 화면
+    def page_form(self, key):
+        title, items = PAGES[key]
+        self.header(title, right_widgets=False)
+        page = ScrollPage(self.main)
+        page.pack(fill="both", expand=True)
+        wrap = tk.Frame(page.inner, bg=C["bg"])
+        wrap.pack(fill="both", expand=True, padx=28, pady=24)
+        box = card(wrap)
+        box.pack(fill="x")
+        for i, (k, label, kind, help_) in enumerate(items):
+            if i:
+                hline(box)
+            row = tk.Frame(box, bg=C["card"])
+            row.pack(fill="x", padx=24, pady=14)
+            row.columnconfigure(0, minsize=280)
+            row.columnconfigure(1, weight=1)
+            lab = tk.Frame(row, bg=C["card"])
+            lab.grid(row=0, column=0, sticky="nw")
+            tk.Label(lab, text=label, bg=C["card"], fg=C["text"], font=F(10, "bold"), anchor="w").pack(fill="x")
+            if help_:
+                tk.Label(lab, text=help_, bg=C["card"], fg=C["muted"], font=F(9), anchor="w", wraplength=260,
+                         justify="left").pack(fill="x", pady=(2, 0))
+            self._field(row, k, kind).grid(row=0, column=1, sticky="we", ipady=3)
+        foot = tk.Frame(wrap, bg=C["bg"])
+        foot.pack(fill="x", pady=16)
+        Btn(foot, "저장", self.on_save, padx=28).pack(side="right")
+        if key == "publish":
+            Btn(foot, "처음 설정 다시 하기", self.show_setup, kind="ghost").pack(side="right", padx=10)
 
     def _field(self, parent, key, kind):
         value = getattr(self.cfg, key)
         if kind == "bool":
             v = tk.BooleanVar(value=value)
             self.vars[key] = v
-            return ttk.Checkbutton(parent, variable=v)
+            return tk.Checkbutton(parent, variable=v, bg=C["card"], activebackground=C["card"],
+                                  text="사용", font=F(10), anchor="w")
         if kind == "lines":
-            t = tk.Text(parent, height=8, width=60)
+            t = tk.Text(parent, height=8, font=F(10), relief="flat", highlightthickness=1,
+                        highlightbackground=C["line"], highlightcolor=C["primary"], padx=8, pady=6)
             t.insert("1.0", "\n".join(value))
             self.vars[key] = t
             return t
         v = tk.StringVar(value=str(value))
         self.vars[key] = v
         if kind.startswith("choice:"):
-            return ttk.Combobox(parent, textvariable=v, values=kind[7:].split(","))
-        return ttk.Entry(parent, textvariable=v, show="•" if kind == "secret" else "")
+            opts = kind[7:].split(",")
+            m = tk.OptionMenu(parent, v, *opts)
+            m.configure(font=F(10), bg=C["card"], relief="flat", highlightthickness=1,
+                        highlightbackground=C["line"], anchor="w")
+            return m
+        return tk.Entry(parent, textvariable=v, show="•" if kind == "secret" else "", font=F(10), relief="flat",
+                        highlightthickness=1, highlightbackground=C["line"], highlightcolor=C["primary"])
+
+    def _collect(self) -> dict:
+        return {k: (w.get("1.0", "end") if isinstance(w, tk.Text) else w.get()) for k, w in self.vars.items()}
+
+    # ------------------------------------------------------------ 최초 설정 마법사
+    def show_setup(self):
+        self.current = "setup"
+        self.clear_main()
+        self._select_nav(None)
+        self.header("처음 한 번만 설정해요", right_widgets=False)
+        page = ScrollPage(self.main)
+        page.pack(fill="both", expand=True)
+        wrap = tk.Frame(page.inner, bg=C["bg"])
+        wrap.pack(fill="both", expand=True, padx=28, pady=24)
+        tk.Label(wrap, text="4가지만 입력하면 다음부터는 '자동 등록 시작' 버튼 하나로 계속 올라가요.",
+                 bg=C["bg"], fg=C["muted"], font=F(10)).pack(anchor="w", pady=(0, 14))
+
+        def step(n, title, help_):
+            box = card(wrap)
+            box.pack(fill="x", pady=(0, 14))
+            head = tk.Frame(box, bg=C["card"])
+            head.pack(fill="x", padx=24, pady=(18, 6))
+            tk.Label(head, text=str(n), bg=C["primary"], fg="white", font=F(10, "bold"), width=2).pack(side="left")
+            tk.Label(head, text=title, bg=C["card"], fg=C["text"], font=F(12, "bold")).pack(side="left", padx=10)
+            tk.Label(box, text=help_, bg=C["card"], fg=C["muted"], font=F(9), anchor="w").pack(fill="x", padx=24)
+            body = tk.Frame(box, bg=C["card"])
+            body.pack(fill="x", padx=24, pady=(8, 20))
+            return body
+
+        b = step(1, "Claude API 키", "console.anthropic.com → API Keys 에서 만든 키를 붙여넣으세요. 이 PC에만 저장돼요.")
+        self._field(b, "anthropic_api_key", "secret").pack(fill="x", ipady=4)
+        b = step(2, "네이버 블로그 ID", "blog.naver.com/ 뒤에 오는 아이디")
+        self._field(b, "naver_blog_id", "str").pack(fill="x", ipady=4)
+        b = step(3, "키워드", "쓰고 싶은 분야의 키워드를 한 줄에 하나씩. 개수 제한 없음")
+        self._field(b, "keywords", "lines").pack(fill="x")
+        b = step(4, "네이버 로그인과 발행 방식", "브라우저 창이 열리면 직접 로그인하세요 (한 번만). 처음에는 임시저장을 권해요.")
+        row = tk.Frame(b, bg=C["card"])
+        row.pack(fill="x")
+        Btn(row, "네이버 로그인 하기", self.on_login, kind="soft").pack(side="left")
+        self.setup_login = tk.Label(row, text=f"로그인 {self.login_state}", bg=C["card"], fg=C["muted"], font=F(9))
+        self.setup_login.pack(side="left", padx=12)
+        mode = tk.StringVar(value=self.cfg.publish_mode)
+        self.vars["publish_mode"] = mode
+        for val, txt in (("draft", "임시저장 (권장)"), ("publish", "바로 발행")):
+            tk.Radiobutton(row, text=txt, value=val, variable=mode, bg=C["card"], font=F(10),
+                           activebackground=C["card"]).pack(side="right", padx=6)
+        auto = tk.BooleanVar(value=self.cfg.auto_start)
+        self.vars["auto_start"] = auto
+        tk.Checkbutton(b, text="프로그램을 켜면 자동 등록 바로 시작", variable=auto, bg=C["card"], font=F(10),
+                       activebackground=C["card"]).pack(anchor="w", pady=(12, 0))
+
+        foot = tk.Frame(wrap, bg=C["bg"])
+        foot.pack(fill="x", pady=6)
+        Btn(foot, "설정 완료하고 시작하기", self.finish_setup, size=11, padx=26, pady=12).pack(side="right")
+
+    def finish_setup(self):
+        values = self._collect()
+        if not str(values.get("anthropic_api_key", "")).strip():
+            messagebox.showwarning("설정 필요", "Claude API 키를 입력하세요.")
+            return
+        if not str(values.get("naver_blog_id", "")).strip():
+            messagebox.showwarning("설정 필요", "네이버 블로그 ID를 입력하세요.")
+            return
+        self.cfg.update(values)
+        self.cfg.setup_done = True
+        self.cfg.save()
+        self._refresh_side()
+        self.show("home")
+        self.msgs.put("설정을 저장했어요. 오른쪽 아래 '자동 등록 시작'을 누르세요.")
 
     # ------------------------------------------------------------ 동작
-    def _collect(self) -> dict:
-        out = {}
-        for key, w in self.vars.items():
-            out[key] = w.get("1.0", "end") if isinstance(w, tk.Text) else w.get()
-        return out
-
-    def on_save(self, quiet=False):
+    def on_save(self):
         try:
             self.cfg.update(self._collect())
-            self.cfg.remote_token = self.vars["remote_token"].get()
+            if "remote_token" in self.vars:
+                self.cfg.remote_token = self.vars["remote_token"].get()
             self.cfg.save()
         except ValueError as e:
             messagebox.showerror("저장 실패", f"숫자 칸을 확인하세요: {e}")
-            return False
+            return
         self.remote.stop()
         self.remote = RemoteControl(self.cfg, self.runner, self.msgs.put)
         self.remote.start()
-        for key in ("daily_limit", "interval_min_minutes", "interval_max_minutes",
-                    "active_start_hour", "active_end_hour"):
-            self.vars[key].set(str(getattr(self.cfg, key)))   # 안전장치로 조정된 값을 화면에 반영
-        if not quiet:
-            self.msgs.put("설정을 저장했습니다.")
-        return True
+        self._refresh_side()
+        self.show(self.current)          # 안전장치로 조정된 값을 다시 보여줌
+        self.msgs.put("설정을 저장했어요.")
 
     def _ready(self) -> bool:
-        if not self.on_save(quiet=True):
-            return False
-        missing = [n for k, n in (("anthropic_api_key", "Claude API 키"), ("naver_blog_id", "네이버 블로그 ID"))
-                   if not getattr(self.cfg, k)]
-        if missing:
-            messagebox.showwarning("설정 필요", ", ".join(missing) + " 을(를) 입력하세요.")
+        if not (self.cfg.setup_done and self.cfg.anthropic_api_key and self.cfg.naver_blog_id):
+            self.show_setup()
             return False
         return True
 
-    def on_start(self):
-        if self._ready():
+    def on_toggle(self):
+        if self.runner.running:
+            self.runner.stop()
+            self.msgs.put("멈춤 요청: 지금 하던 글까지만 마치고 멈춰요.")
+        elif self._ready():
             self.runner.start()
-
-    def on_stop(self):
-        self.runner.stop()
-        self.msgs.put("정지 요청: 지금 하던 글까지만 마치고 멈춥니다.")
+        self._refresh_home()
 
     def on_once(self):
         if self._ready() and not self.runner.running:
             threading.Thread(target=self.runner.run_once, daemon=True).start()
 
     def on_login(self):
+        if "naver_blog_id" in self.vars:
+            self.cfg.naver_blog_id = self.vars["naver_blog_id"].get().strip()
+
         def job():
             from .naver import NaverBlog
             self.msgs.put("브라우저에서 네이버에 로그인하세요 (최대 5분 대기).")
-            with NaverBlog(self.cfg.naver_blog_id, self.cfg.browser_channel) as nb:
-                ok = nb.is_logged_in() or nb.login_interactive()
-            self.msgs.put("네이버 로그인 확인됨." if ok else "로그인 확인 실패.")
-        self.on_save(quiet=True)
+            try:
+                with NaverBlog(self.cfg.naver_blog_id, self.cfg.browser_channel) as nb:
+                    ok = nb.is_logged_in() or nb.login_interactive()
+            except Exception as e:
+                self.msgs.put(f"브라우저 실행 실패: {e}")
+                ok = False
+            self.login_state = "됨" if ok else "필요"
+            self.msgs.put("네이버 로그인 확인됨." if ok else "네이버 로그인 확인 실패.")
         threading.Thread(target=job, daemon=True).start()
 
     def on_shortcut(self):
         try:
             path = install.install_and_shortcut()
-            self.msgs.put(f"바탕화면에 MYDAF 아이콘을 만들었습니다: {path}")
+            self.msgs.put(f"바탕화면에 MYDAF 아이콘을 만들었어요: {path}")
         except Exception as e:
             messagebox.showerror("아이콘 만들기 실패", str(e))
 
     def on_open_folder(self):
-        path = str(app_dir())
+        self._open_path(app_dir())
+
+    def _open_path(self, path: Path):
         if sys.platform == "win32":
-            os.startfile(path)  # noqa: S606
+            os.startfile(str(path))  # noqa: S606
         else:
-            subprocess.Popen(["xdg-open", path])
+            subprocess.Popen(["xdg-open", str(path)])
+
+    # ------------------------------------------------------------ 로그 표시
+    def _render_log(self, widget, lines):
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        if not lines:
+            widget.insert("end", "진행 내용이 여기에 실시간으로 표시돼요.", "muted")
+        for line in lines:
+            widget.insert("end", line + "\n")
+        widget.see("end")
+        widget.configure(state="disabled")
 
     def _pump(self):
+        new = []
         while not self.msgs.empty():
-            line = self.msgs.get()
-            self.log.configure(state="normal")
-            self.log.insert("end", line + "\n")
-            self.log.see("end")
-            self.log.configure(state="disabled")
-        st = self.runner.status()
-        names = {"idle": "대기 중", "running": "작업 중", "waiting": "다음 글 대기", "stopping": "정지 중"}
-        self.status.set(f"상태: {names.get(st['state'], st['state'])} · 오늘 {st['today']}/{st['daily_limit']}"
-                        f"{' · 원격 제어 켜짐' if self.cfg.remote_enabled else ''}")
-        self.root.after(500, self._pump)
+            new.append(f"{datetime.now():%H:%M}  {self.msgs.get()}")
+        if new:
+            self.log_lines = (self.log_lines + new)[-1000:]
+            for name in ("home_log", "hist_log"):
+                w = getattr(self, name, None)
+                if w is not None and w.winfo_exists():
+                    self._render_log(w, self.log_lines[-40 if name == "home_log" else -300:])
+            if getattr(self, "setup_login", None) is not None and self.setup_login.winfo_exists():
+                self.setup_login.configure(text=f"로그인 {self.login_state}")
+            self._refresh_side()
+        self._refresh_home()
+        self._refresh_job_area()
+        self._refresh_job_box()
+        self._refresh_header()
+        self._refresh_side()
+        self.root.after(700, self._pump)
 
     def run(self):
         self.root.mainloop()

@@ -109,3 +109,31 @@ def test_config_roundtrip_and_unlimited_keywords():
     assert c2.keywords[0] == long_kw and len(c2.keywords) == 301
     assert c2.daily_limit == 2 and c2.use_kiss is False
     assert json.loads(Config.path().read_text(encoding="utf-8"))["daily_limit"] == 2
+
+
+def test_commons_parsing_keeps_only_free_licenses():
+    from mydaf import images
+    data = {"query": {"pages": {
+        "1": {"index": 2, "imageinfo": [{"thumburl": "https://u/a.jpg", "width": 2000, "descriptionurl": "https://c/a",
+                                         "extmetadata": {"LicenseShortName": {"value": "CC BY-SA 4.0"},
+                                                         "Artist": {"value": "<a href='x'>Kim</a>"}}}]},
+        "2": {"index": 1, "imageinfo": [{"thumburl": "https://u/b.jpg", "width": 2000,
+                                         "extmetadata": {"LicenseShortName": {"value": "All rights reserved"}}}]},
+        "3": {"index": 3, "imageinfo": [{"thumburl": "https://u/c.jpg", "width": 300,
+                                         "extmetadata": {"LicenseShortName": {"value": "CC0"}}}]},
+    }}}
+    out = images.parse_commons(data)
+    assert [o["url"] for o in out] == ["https://u/a.jpg"]
+    assert out[0]["credit"] == "Kim, CC BY-SA 4.0, Wikimedia Commons"
+
+
+def test_blocks_put_image_under_heading_and_credit_in_citations():
+    from mydaf.images import Picture
+    post = {"intro": "도입", "conclusion": "끝", "sections": [
+        {"heading": "A", "paragraphs": [{"text": "a"}]}, {"heading": "B", "paragraphs": [{"text": "b"}]}]}
+    pics = [Picture("/x/img1.jpg", "Kim, CC0, Wikimedia Commons", ""), None]
+    blocks = render.to_blocks(post, [], images=pics, heading_size=34, body_size=30)
+    kinds = [b["type"] for b in blocks]
+    assert kinds == ["para", "heading", "image", "para", "heading", "para", "para", "citations"]
+    assert blocks[1]["size"] == 34 and blocks[1]["style"] == "quote" and blocks[0]["size"] == 30
+    assert blocks[-1]["lines"][-1] == "[사진] Kim, CC0, Wikimedia Commons"

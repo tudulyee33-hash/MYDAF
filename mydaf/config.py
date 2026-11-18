@@ -28,6 +28,10 @@ MIN_INTERVAL_FLOOR = 180      # 글 사이 최소 간격(분) = 3시간
 
 @dataclass
 class Config:
+    # 화면
+    setup_done: bool = False             # 최초 설정 마법사를 마쳤는지
+    auto_start: bool = False             # 프로그램을 켜면 자동 등록 바로 시작
+
     # AI
     ai_provider: str = "claude"          # 지금은 claude. ai.py 에 다른 공급자를 추가할 수 있다.
     anthropic_api_key: str = ""
@@ -39,6 +43,16 @@ class Config:
     publish_mode: str = "draft"          # draft(임시저장) | publish(발행)
     category: str = ""                   # 비워두면 기본 카테고리
     browser_channel: str = "msedge"      # msedge | chrome
+
+    # 글쓰기
+    writer_style: str = "정보 전달형 전문가"   # 정보 전달형 전문가 | 트렌드 관찰형 | 친근한 이웃형 | 분석 리포트형
+    heading_style: str = "quote"         # quote(인용구 소제목) | bold(굵은 글씨)
+    heading_font_size: int = 34
+    body_font_size: int = 30
+    use_images: bool = True
+    images_per_post: int = 4
+    pexels_api_key: str = ""             # 선택: pexels.com 무료 키. 없으면 위키미디어 공용(자유 라이선스)
+    show_browser: bool = True            # 작성 중 블로그 화면 보이기
 
     # 주제/키워드 (개수·길이 제한 없음, 한 줄에 하나)
     keywords: list[str] = field(default_factory=list)

@@ -45,7 +45,8 @@ class FakeBlog:
     def __exit__(self, *a): pass
     def is_logged_in(self): return True
 
-    def write(self, title, blocks, tags, mode, category, folder):
+    def write(self, title, blocks, tags, mode, category, folder, on_progress=lambda f, m: None):
+        on_progress(0.5, "본문")
         FakeBlog.written.append((title, blocks, tags, mode))
         return {"status": "draft", "url": "", "warnings": []}
 
@@ -66,7 +67,7 @@ def fresh_history(monkeypatch, tmp_path):
     return hist
 
 
-ALWAYS = dict(active_start_hour=0, active_end_hour=24)
+ALWAYS = dict(active_start_hour=0, active_end_hour=24, use_images=False)
 
 
 def test_full_pipeline_logs_reasoning(monkeypatch):
@@ -78,6 +79,7 @@ def test_full_pipeline_logs_reasoning(monkeypatch):
     r = runner_mod.Runner(cfg, say=lambda m: None)
     res = r.run_once()
     assert res["status"] == "draft" and res["inferences"] == 1 and res["sources"] == 2
+    assert r.job["done"] and r.job["pct"] == 100 and r.job["step"] == 5 and r.job["events"]
     title, blocks, tags, mode = FakeBlog.written[-1]
     assert title == "전기차 정리" and mode == "draft"
     assert blocks[-1]["type"] == "citations" and blocks[-1]["align"] == "right"

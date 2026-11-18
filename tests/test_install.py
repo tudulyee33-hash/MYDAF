@@ -23,5 +23,5 @@ def test_create_real_desktop_shortcut_on_windows():
 
 
 def test_first_run_does_nothing_outside_frozen_windows(tmp_path):
-    assert install.first_run_setup(tmp_path) is None
+    assert install.startup_check(tmp_path) is None
     assert not (tmp_path / "desktop_shortcut_done").exists()

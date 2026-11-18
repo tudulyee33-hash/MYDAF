@@ -33,6 +33,11 @@ SELECTORS = {
     "publish_confirm": "[data-testid='seOnePublishBtn']",
     "save_draft": "button[data-click-area='tpb.save'], button.save_btn__bzc5B",
     "tag_input": "#tag-input",
+    "quote_btn": "button[data-name='quotation'], .se-quotation-toolbar-button, .se-insert-quotation-default-toolbar-button",
+    "quote_opt": "button[data-name='quotation'][data-value], .se-toolbar-option-insert-quotation-quotation_line-button",
+    "quote_comp": ".se-main-container .se-component.se-quotation",
+    "image_btn": "button[data-name='image'], .se-image-toolbar-button",
+    "image_comp": ".se-main-container .se-component.se-image",
     "category_btn": "[data-click-area='tpb*i.category']",
 }
 
@@ -136,9 +141,68 @@ class NaverBlog:
         human_pause(0.1, 0.3)
 
     # ------------------------------------------------------------ 글쓰기
+    def _focus_after(self, f: Frame, p: Page, comp_selector: str) -> bool:
+        """방금 넣은 컴포넌트(인용구·사진) 바로 다음 본문 줄로 커서를 옮긴다."""
+        ok = f.evaluate(
+            """(sel) => {
+                const comps = document.querySelectorAll(sel);
+                const last = comps[comps.length - 1];
+                if (!last) return false;
+                let n = last.nextElementSibling;
+                while (n && !(n.classList.contains('se-text') || n.querySelector('.se-text-paragraph'))) n = n.nextElementSibling;
+                const para = n && n.querySelector('.se-text-paragraph');
+                if (!para) return false;
+                para.scrollIntoView({block: 'center'});
+                return true;
+            }""", comp_selector)
+        if ok:
+            comps = f.locator(comp_selector)
+            nxt = comps.last.locator("xpath=following-sibling::*[.//*[contains(@class,'se-text-paragraph')]][1]")
+            try:
+                nxt.locator(".se-text-paragraph").last.click(timeout=3000)
+                return True
+            except Exception:
+                pass
+        p.keyboard.press("ArrowDown")
+        p.keyboard.press("ArrowDown")
+        return not f.evaluate("(sel) => !!(document.activeElement && document.activeElement.closest(sel))",
+                              comp_selector)
+
+    def _quote_heading(self, f: Frame, p: Page, text: str) -> bool | None:
+        """True=성공, None=인용구를 못 넣음(아무것도 안 씀), False=넣고 썼지만 다음 줄로 못 나옴."""
+        before = f.locator(SELECTORS["quote_comp"]).count()
+        if not self._click_first_visible(f, SELECTORS["quote_btn"]):
+            return None
+        human_pause(0.2, 0.4)
+        self._click_first_visible(f, SELECTORS["quote_opt"])      # 스타일 목록이 열리는 버전이면 첫 번째
+        try:
+            f.wait_for_function("([sel, n]) => document.querySelectorAll(sel).length > n",
+                                arg=[SELECTORS["quote_comp"], before], timeout=5000)
+        except PWTimeout:
+            return None
+        self._type(p, text)
+        return self._focus_after(f, p, SELECTORS["quote_comp"])
+
+    def _insert_image(self, f: Frame, p: Page, path: str) -> bool:
+        before = f.locator(SELECTORS["image_comp"]).count()
+        try:
+            with p.expect_file_chooser(timeout=8000) as fc:
+                if not self._click_first_visible(f, SELECTORS["image_btn"]):
+                    return False
+            fc.value.set_files(path)
+            f.wait_for_function("([sel, n]) => document.querySelectorAll(sel).length > n",
+                                arg=[SELECTORS["image_comp"], before], timeout=60000)
+        except Exception as e:
+            log.info("사진 넣기 실패: %s", e)
+            return False
+        time.sleep(1.0)
+        return self._focus_after(f, p, SELECTORS["image_comp"])
+
+    # ------------------------------------------------------------ 글쓰기
     def write(self, title: str, blocks: list[dict], tags: list[str], mode: str = "draft",
-              category: str = "", shot_dir: Path | None = None) -> dict:
+              category: str = "", shot_dir: Path | None = None, on_progress=lambda frac, msg: None) -> dict:
         p = self.page()
+        on_progress(0.0, "에디터 여는 중")
         p.goto(f"https://blog.naver.com/{self.blog_id}?Redirect=Write")
         f = self._editor(p)
         time.sleep(1.5)
@@ -150,27 +214,58 @@ class NaverBlog:
 
         f.locator(SELECTORS["body"]).first.click()
         human_pause()
-        self._font_size(f, 15) or warnings.append("본문 글자 크기 지정 실패")
-        for b in blocks:
+        state = {"size": None, "quote_ok": True}
+
+        def size(n: int, what: str):
+            if state["size"] == n:
+                return
+            if self._font_size(f, n):
+                state["size"] = n
+            else:
+                warnings.append(f"{what} 글자 크기 {n} 지정 실패")
+
+        total = max(len(blocks), 1)
+        for i, b in enumerate(blocks):
+            on_progress(i / total, {"heading": "소제목", "para": "본문", "image": "사진",
+                                    "citations": "출처"}.get(b["type"], "") + " 입력 중")
             if b["type"] == "heading":
+                if b.get("style") == "quote" and state["quote_ok"]:
+                    size(b["size"], "소제목")
+                    res = self._quote_heading(f, p, b["text"])
+                    state["size"] = None              # 인용구를 나오면 서식이 초기화될 수 있음
+                    if res is True:
+                        continue
+                    state["quote_ok"] = False
+                    if res is False:
+                        warnings.append("인용구 다음 줄로 이동 실패 → 이후 소제목은 굵은 글씨로")
+                        p.keyboard.press("Enter")
+                        p.keyboard.press("Enter")
+                        continue
+                    warnings.append("인용구 소제목을 넣지 못해 굵은 글씨 소제목으로 대신함")
                 p.keyboard.press("Enter")
-                self._font_size(f, 19) or warnings.append("소제목 크기 지정 실패")
+                size(b["size"], "소제목")
                 p.keyboard.press("Control+b")
                 self._type(p, b["text"])
                 p.keyboard.press("Control+b")
                 p.keyboard.press("Enter")
-                self._font_size(f, 15)
+            elif b["type"] == "image":
+                if not self._insert_image(f, p, b["path"]):
+                    warnings.append(f"사진 넣기 실패: {Path(b['path']).name}")
+                state["size"] = None
             elif b["type"] == "para":
+                size(b.get("size", 15), "본문")
                 self._type(p, b["text"])
                 p.keyboard.press("Enter")
                 p.keyboard.press("Enter")
             elif b["type"] == "citations":
                 p.keyboard.press("Enter")
                 self._align(f, b["align"]) or warnings.append(f"출처 {b['align']} 정렬 실패")
-                self._font_size(f, b["size"]) or warnings.append("출처 작은 글씨 지정 실패")
+                state["size"] = None
+                size(b["size"], "출처")
                 for line in b["lines"]:
                     self._type(p, line)
                     p.keyboard.press("Enter")
+        on_progress(1.0, "저장 확인 중")
         human_pause(1, 2)
         if shot_dir:
             p.screenshot(path=str(shot_dir / "editor.png"), full_page=True)
