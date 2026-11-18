@@ -24,9 +24,10 @@ def test_all_pages_render(monkeypatch):
     app = gui.App()
     try:
         assert app.current == "setup"              # 처음 실행 → 설정 마법사
-        app.vars["anthropic_api_key"].set("sk-test")
+        app.setup_key.set("gm-test")
         app.finish_setup()
         assert app.current == "home" and app.cfg.setup_done
+        assert app.cfg.ai_provider == "gemini" and app.cfg.gemini_api_key == "gm-test"
         for key in ("history", "keywords", "sources", "quality", "publish", "remote", "home"):
             app.show(key)
             app.root.update()

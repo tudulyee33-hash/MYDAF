@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -79,8 +79,12 @@ PAGES = {
         ("citation_font_size", "출처 글자 크기", "choice:11,13", ""),
     ]),
     "publish": ("발행 설정", [
+        ("ai_provider", "글 쓸 AI", "choice:gemini,claude", "gemini = 무료 키 가능, claude = 유료·최고품질"),
+        ("gemini_api_key", "Gemini API 키", "secret", "aistudio.google.com 에서 무료 발급"),
+        ("gemini_model", "Gemini 모델", "combo:gemini-2.5-flash,gemini-2.5-pro,gemini-2.5-flash-lite",
+         "무료는 flash 권장 · 새 모델 이름을 직접 입력해도 됨"),
         ("anthropic_api_key", "Claude API 키", "secret", "console.anthropic.com 에서 발급"),
-        ("model", "AI 모델", "choice:claude-opus-5-5,claude-sonnet-5-5", "Opus 가 가장 고품질"),
+        ("model", "Claude 모델", "choice:claude-opus-5-5,claude-sonnet-5-5", "Opus 가 가장 고품질"),
         ("naver_blog_id", "네이버 블로그 ID", "str", "blog.naver.com/ 뒤의 아이디"),
         ("publish_mode", "발행 방식", "choice:draft,publish", "draft = 임시저장, publish = 바로 발행"),
         ("category", "카테고리", "str", "비우면 기본 카테고리"),
@@ -203,7 +207,7 @@ class App:
         self.nav_items: dict[str, tuple[tk.Frame, list[tk.Label]]] = {}
         self._build_sidebar()
         self.current = None
-        if self.cfg.setup_done and self.cfg.anthropic_api_key:
+        if self.cfg.setup_done and self.cfg.ai_key():
             self.show("home")
         else:
             self.show_setup()
@@ -683,6 +687,9 @@ class App:
             return t
         v = tk.StringVar(value=str(value))
         self.vars[key] = v
+        if kind.startswith("combo:"):
+            from tkinter import ttk
+            return ttk.Combobox(parent, textvariable=v, values=kind[6:].split(","), font=F(10))
         if kind.startswith("choice:"):
             opts = kind[7:].split(",")
             m = tk.OptionMenu(parent, v, *opts)
@@ -693,7 +700,8 @@ class App:
                         highlightthickness=1, highlightbackground=C["line"], highlightcolor=C["primary"])
 
     def _collect(self) -> dict:
-        return {k: (w.get("1.0", "end") if isinstance(w, tk.Text) else w.get()) for k, w in self.vars.items()}
+        return {k: (w.get("1.0", "end") if isinstance(w, tk.Text) else w.get()) for k, w in self.vars.items()
+                if not k.startswith("_")}
 
     # ------------------------------------------------------------ 최초 설정 마법사
     def show_setup(self):
@@ -720,8 +728,30 @@ class App:
             body.pack(fill="x", padx=24, pady=(8, 20))
             return body
 
-        b = step(1, "Claude API 키", "console.anthropic.com → API Keys 에서 만든 키를 붙여넣으세요. 이 PC에만 저장돼요.")
-        self._field(b, "anthropic_api_key", "secret").pack(fill="x", ipady=4)
+        b = step(1, "글 쓸 AI와 API 키", "키는 이 PC에만 저장돼요. Gemini 는 Google AI Studio 에서 무료로 발급받을 수 있어요.")
+        prov = tk.StringVar(value=self.cfg.ai_provider)
+        self.vars["ai_provider"] = prov
+        key = tk.StringVar(value=self.cfg.ai_key())
+        self.setup_key = key
+        hint = tk.Label(b, bg=C["card"], fg=C["muted"], font=F(9), anchor="w")
+        keys = {"gemini": self.cfg.gemini_api_key, "claude": self.cfg.anthropic_api_key}
+        last = {"p": prov.get()}
+
+        def switch(*_):
+            keys[last["p"]] = key.get()           # 고르기 전 입력값 보관
+            last["p"] = prov.get()
+            key.set(keys.get(prov.get(), ""))
+            hint.configure(text={"gemini": "aistudio.google.com → Get API key (무료 · 하루 3개 글에 충분)",
+                                 "claude": "console.anthropic.com → API Keys (유료 · 가장 고품질)"}[prov.get()])
+        radios = tk.Frame(b, bg=C["card"])
+        radios.pack(fill="x", pady=(0, 8))
+        for val, txt in (("gemini", "Google Gemini (무료)"), ("claude", "Claude (유료)")):
+            tk.Radiobutton(radios, text=txt, value=val, variable=prov, command=switch, bg=C["card"],
+                           font=F(10, "bold"), activebackground=C["card"]).pack(side="left", padx=(0, 18))
+        tk.Entry(b, textvariable=key, show="•", font=F(10), relief="flat", highlightthickness=1,
+                 highlightbackground=C["line"], highlightcolor=C["primary"]).pack(fill="x", ipady=4)
+        hint.pack(fill="x", pady=(6, 0))
+        switch()
         b = step(2, "네이버 블로그 ID", "blog.naver.com/ 뒤에 오는 아이디")
         self._field(b, "naver_blog_id", "str").pack(fill="x", ipady=4)
         b = step(3, "키워드", "쓰고 싶은 분야의 키워드를 한 줄에 하나씩. 개수 제한 없음")
@@ -748,9 +778,11 @@ class App:
 
     def finish_setup(self):
         values = self._collect()
-        if not str(values.get("anthropic_api_key", "")).strip():
-            messagebox.showwarning("설정 필요", "Claude API 키를 입력하세요.")
+        key = self.setup_key.get().strip()
+        if not key:
+            messagebox.showwarning("설정 필요", "AI API 키를 입력하세요.")
             return
+        values["gemini_api_key" if values.get("ai_provider") == "gemini" else "anthropic_api_key"] = key
         if not str(values.get("naver_blog_id", "")).strip():
             messagebox.showwarning("설정 필요", "네이버 블로그 ID를 입력하세요.")
             return
@@ -779,7 +811,7 @@ class App:
         self.msgs.put("설정을 저장했어요.")
 
     def _ready(self) -> bool:
-        if not (self.cfg.setup_done and self.cfg.anthropic_api_key and self.cfg.naver_blog_id):
+        if not (self.cfg.setup_done and self.cfg.ai_key() and self.cfg.naver_blog_id):
             self.show_setup()
             return False
         return True

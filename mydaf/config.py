@@ -33,7 +33,9 @@ class Config:
     auto_start: bool = False             # 프로그램을 켜면 자동 등록 바로 시작
 
     # AI
-    ai_provider: str = "claude"          # 지금은 claude. ai.py 에 다른 공급자를 추가할 수 있다.
+    ai_provider: str = "gemini"          # gemini(무료 키 가능) | claude
+    gemini_api_key: str = ""             # aistudio.google.com 에서 무료 발급
+    gemini_model: str = "gemini-2.5-flash"
     anthropic_api_key: str = ""
     model: str = "claude-opus-5-5"
     effort: str = "xhigh"           # 고품질: 깊게 생각하고 쓰기
@@ -91,6 +93,9 @@ class Config:
     remote_url: str = ""                 # 예: https://내서버.com
     remote_token: str = ""
     remote_poll_seconds: int = 30
+
+    def ai_key(self) -> str:
+        return self.gemini_api_key if self.ai_provider == "gemini" else self.anthropic_api_key
 
     def __post_init__(self):
         self.clamp()

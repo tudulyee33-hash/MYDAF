@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import date
 
 import anthropic
+import requests
 
 from .logs import log
 
@@ -132,9 +134,39 @@ REVISE_SYSTEM = """당신은 깐깐한 블로그 편집장입니다. 초안을 �
 
 
 class Writer:
-    def extract_facts(self, topic: str, sources: list) -> dict: raise NotImplementedError
-    def write_post(self, topic: str, facts: list[dict]) -> dict: raise NotImplementedError
-    def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict: raise NotImplementedError
+    """공통: 프롬프트 구성. 공급자별로 _json(system, user, schema) 만 구현한다."""
+    style = STYLES["정보 전달형 전문가"]
+    max_source_chars = 12000          # 자료 1건당 AI에 보내는 최대 글자 수
+
+    def _json(self, system: str, user: str, schema: dict) -> dict:
+        raise NotImplementedError
+
+    def extract_facts(self, topic: str, sources: list) -> dict:
+        docs = "\n\n".join(
+            f'<source id="{s.id}" kind="{s.kind}" publisher="{s.publisher}" date="{s.published}">\n'
+            f"제목: {s.title}\n본문: {s.text[: self.max_source_chars]}\n</source>"
+            for s in sources if s.text
+        )
+        user = f"주제: {topic}\n오늘 날짜: {date.today()}\n\n<sources>\n{docs}\n</sources>\n\n위 자료에서 사실을 뽑아 주세요."
+        return self._json(FACTS_SYSTEM, user, FACTS_SCHEMA)
+
+    @staticmethod
+    def _fact_lines(facts: list[dict]) -> str:
+        return "\n".join(
+            f"{f['id']}: {f['statement']}  (확인 매체 {f['outlet_count']}곳"
+            f"{', 단일 출처' if f['outlet_count'] < 2 else ''})" for f in facts
+        )
+
+    def write_post(self, topic: str, facts: list[dict]) -> dict:
+        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+                "\n\n이 사실만으로 글을 써 주세요.")
+        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}", user, POST_SCHEMA)
+
+    def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict:
+        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+                f"\n\n<draft>\n{json.dumps(draft, ensure_ascii=False)}\n</draft>\n\n"
+                "초안을 점검하고 고친 최종본을 주세요.")
+        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)
 
 
 class ClaudeWriter(Writer):
@@ -172,35 +204,96 @@ class ClaudeWriter(Writer):
         text = next(b.text for b in msg.content if b.type == "text")
         return json.loads(text)
 
-    def extract_facts(self, topic: str, sources: list) -> dict:
-        docs = "\n\n".join(
-            f'<source id="{s.id}" kind="{s.kind}" publisher="{s.publisher}" date="{s.published}">\n'
-            f"제목: {s.title}\n본문: {s.text}\n</source>"
-            for s in sources if s.text
-        )
-        user = f"주제: {topic}\n오늘 날짜: {date.today()}\n\n<sources>\n{docs}\n</sources>\n\n위 자료에서 사실을 뽑아 주세요."
-        return self._json(FACTS_SYSTEM, user, FACTS_SCHEMA)
 
-    @staticmethod
-    def _fact_lines(facts: list[dict]) -> str:
-        return "\n".join(
-            f"{f['id']}: {f['statement']}  (확인 매체 {f['outlet_count']}곳"
-            f"{', 단일 출처' if f['outlet_count'] < 2 else ''})" for f in facts
-        )
+def to_gemini_schema(schema: dict) -> dict:
+    """JSON Schema → Gemini responseSchema (OpenAPI 부분집합: additionalProperties 없음, 타입 대문자)."""
+    out: dict = {}
+    for k, v in schema.items():
+        if k == "additionalProperties":
+            continue
+        if k == "type":
+            out["type"] = str(v).upper()
+        elif k == "properties":
+            out["properties"] = {name: to_gemini_schema(sub) for name, sub in v.items()}
+            out["propertyOrdering"] = list(v.keys())
+        elif k == "items":
+            out["items"] = to_gemini_schema(v)
+        else:
+            out[k] = v
+    return out
 
-    def write_post(self, topic: str, facts: list[dict]) -> dict:
-        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
-                "\n\n이 사실만으로 글을 써 주세요.")
-        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}", user, POST_SCHEMA)
 
-    def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict:
-        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
-                f"\n\n<draft>\n{json.dumps(draft, ensure_ascii=False)}\n</draft>\n\n"
-                "초안을 점검하고 고친 최종본을 주세요.")
-        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)
+class GeminiWriter(Writer):
+    """Google Gemini (AI Studio 무료 키 사용 가능). 무료 한도에 맞춰 호출 간격을 두고, 한도 초과(429) 시 기다렸다 재시도."""
+    URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    MIN_GAP_SECONDS = 15              # 무료 한도(분당 요청 수) 여유 있게
+    max_source_chars = 4000           # 무료 한도(분당 토큰 수)에 맞춰 자료를 줄여서 보냄
+    _last_call = 0.0
+
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash", style: str = "정보 전달형 전문가"):
+        if not api_key:
+            raise ValueError("Gemini API 키가 비어 있습니다. 설정에서 입력하세요.")
+        self.api_key = api_key
+        self.model = model.strip() or "gemini-2.5-flash"
+        self.style = STYLES.get(style, STYLES["정보 전달형 전문가"])
+
+    def _wait_gap(self):
+        gap = time.time() - GeminiWriter._last_call
+        if gap < self.MIN_GAP_SECONDS:
+            time.sleep(self.MIN_GAP_SECONDS - gap)
+        GeminiWriter._last_call = time.time()
+
+    def _json(self, system: str, user: str, schema: dict) -> dict:
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {"responseMimeType": "application/json",
+                                 "responseSchema": to_gemini_schema(schema),
+                                 "maxOutputTokens": 32000},
+        }
+        for attempt in range(5):
+            self._wait_gap()
+            try:
+                r = requests.post(self.URL.format(model=self.model), json=body, timeout=300,
+                                  headers={"x-goog-api-key": self.api_key})
+            except requests.RequestException as e:
+                log.warning("Gemini 연결 실패 (%s회): %s", attempt + 1, e)
+                time.sleep(20 * (attempt + 1))
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                wait = _retry_delay(r) or 30 * (attempt + 1)
+                log.warning("Gemini 한도/일시 오류 %s, %s초 후 재시도", r.status_code, wait)
+                time.sleep(min(wait, 120))
+                continue
+            if r.status_code in (400, 401, 403, 404):
+                msg = r.json().get("error", {}).get("message", r.text[:200]) if r.text else r.status_code
+                raise RuntimeError(f"Gemini 요청 실패 ({r.status_code}): {msg}")
+            r.raise_for_status()
+            data = r.json()
+            cand = (data.get("candidates") or [{}])[0]
+            reason = cand.get("finishReason", "")
+            if reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST") or data.get("promptFeedback", {}).get("blockReason"):
+                raise RuntimeError("AI가 이 주제의 작성을 거절했습니다.")
+            if reason == "MAX_TOKENS":
+                raise RuntimeError("AI 응답이 길이 제한에 걸려 잘렸습니다.")
+            text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []) if not p.get("thought"))
+            return json.loads(text)
+        raise RuntimeError("Gemini 무료 사용 한도에 걸려 여러 번 실패했습니다. 잠시 후 다시 시도하세요.")
+
+
+def _retry_delay(r) -> int | None:
+    try:
+        for d in r.json().get("error", {}).get("details", []):
+            if "retryDelay" in d:
+                return int(float(str(d["retryDelay"]).rstrip("s"))) + 2
+    except ValueError:
+        pass
+    return None
 
 
 def make_writer(cfg) -> Writer:
     if cfg.ai_provider == "claude":
         return ClaudeWriter(cfg.anthropic_api_key, cfg.model, cfg.effort, cfg.writer_style)
+    if cfg.ai_provider == "gemini":
+        return GeminiWriter(cfg.gemini_api_key, cfg.gemini_model, cfg.writer_style)
     raise ValueError(f"지원하지 않는 AI 공급자: {cfg.ai_provider}")
