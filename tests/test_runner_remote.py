@@ -47,7 +47,7 @@ class FakeBlog:
 
     def write(self, title, blocks, tags, mode, category, folder, on_progress=lambda f, m: None):
         on_progress(0.5, "본문")
-        FakeBlog.written.append((title, blocks, tags, mode))
+        FakeBlog.written.append((title, blocks, tags, mode() if callable(mode) else mode))
         return {"status": "draft", "url": "", "warnings": []}
 
 
@@ -80,6 +80,10 @@ def test_full_pipeline_logs_reasoning(monkeypatch):
     res = r.run_once()
     assert res["status"] == "draft" and res["inferences"] == 1 and res["sources"] == 2
     assert r.job["done"] and r.job["pct"] == 100 and r.job["step"] == 5 and r.job["events"]
+    assert r.job["title"] == "전기차 정리" and r.job["outline"] and r.job["blocks_total"] > 0
+    assert r.job["status"] == "draft" and len(r.job["step_times"]) == 6
+    hist = logs.read_history()[-1]
+    assert len(hist["step_times"]) == 6 and hist["chars"] > 0 and "elapsed" in hist
     title, blocks, tags, mode = FakeBlog.written[-1]
     assert title == "전기차 정리" and mode == "draft"
     assert blocks[-1]["type"] == "citations" and blocks[-1]["align"] == "right"
@@ -202,3 +206,28 @@ def test_ai_account_error_stops_loop_and_is_not_counted(monkeypatch):
     assert not r.running and "크레딧" in r.ai_problem
     assert r.last_result["status"] == "ai_error" and r.posted_today() == 0
     assert sum(m.startswith("⚠") for m in said) == 1    # 주제마다 반복하지 않고 한 번만
+
+
+def test_typical_and_remaining_seconds():
+    hist = [{"step_times": [10, 20, 30, 5, 100, 4]}, {"step_times": [30, 40, 50, 5, 200, 6]},
+            {"step_times": [20, 30, 40, 5, 150, 5]}, {"status": "skipped"}]
+    typ = runner_mod.typical_step_seconds(hist)
+    assert typ == [20, 30, 40, 5, 150, 5]
+    assert runner_mod.typical_step_seconds([]) == runner_mod.STEP_EXPECTED_SEC
+    job = {"step": 2, "started": 0, "step_started": 100}
+    assert runner_mod.remaining_seconds(job, typ, now=110) == 30 + 5 + 150 + 5
+
+
+def test_batch_runs_with_finish_mode(monkeypatch):
+    import mydaf.naver
+    monkeypatch.setattr(runner_mod.ai, "make_writer", lambda cfg: FakeWriter())
+    monkeypatch.setattr(runner_mod.sources, "collect", fake_collect)
+    monkeypatch.setattr(mydaf.naver, "NaverBlog", FakeBlog)
+    cfg = Config(gemini_api_key="x", keywords=["전기차"], use_google_trends=False, publish_mode="draft", **ALWAYS)
+    r = runner_mod.Runner(cfg, say=lambda m: None)
+    assert r.start_batch("전기차", 2, "publish")
+    r.thread.join(timeout=5)          # 2편째는 3시간 간격 대기 중
+    assert r.running and FakeBlog.written[-1][3] == "publish" and r.state == "waiting"
+    r.stop()
+    r.thread.join(timeout=5)
+    assert not r.running and r.finish_mode is None

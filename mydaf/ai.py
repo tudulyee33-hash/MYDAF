@@ -134,6 +134,13 @@ REVISE_SYSTEM = """당신은 깐깐한 블로그 편집장입니다. 초안을 �
 규칙은 초안 작성 규칙과 같습니다. 출처·URL 은 본문에 쓰지 마세요."""
 
 
+def _bundle_note(topic: str) -> str:
+    if "," not in topic:
+        return ""
+    return ("\n(주제 묶음입니다. 검증된 사실이 있는 검색어들만 골라, 서로의 연결고리를 찾아 하나의 흐름으로 엮어 "
+            "쓰세요. 사실이 없는 검색어는 억지로 넣지 마세요. 제목은 묶음 전체가 아니라 실제로 다룬 내용을 보여 주세요.)")
+
+
 class AIAccountError(RuntimeError):
     """키·결제 문제라 다시 시도해도 안 되는 오류. 자동 등록을 멈추고 사용자에게 알린다."""
 
@@ -170,12 +177,12 @@ class Writer:
         )
 
     def write_post(self, topic: str, facts: list[dict]) -> dict:
-        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+        user = (f"주제: {topic}{_bundle_note(topic)}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
                 "\n\n이 사실만으로 글을 써 주세요.")
         return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}", user, POST_SCHEMA)
 
     def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict:
-        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+        user = (f"주제: {topic}{_bundle_note(topic)}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
                 f"\n\n<draft>\n{json.dumps(draft, ensure_ascii=False)}\n</draft>\n\n"
                 "초안을 점검하고 고친 최종본을 주세요.")
         return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)

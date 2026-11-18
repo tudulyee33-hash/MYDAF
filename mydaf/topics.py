@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import feedparser
 
+from .config import split_terms
 from .logs import log, read_history
 from .sources import HTTP, TIMEOUT, clean
 
@@ -29,7 +30,9 @@ def recent_topics(days: int) -> set[str]:
             t = datetime.fromisoformat(h["time"])
             if t >= since and h.get("status") in ("published", "draft"):
                 out.add(h["topic"].strip().lower())
+                out.update(t.lower() for t in split_terms(h["topic"]))
             elif h.get("status") == "skipped" and t >= datetime.now() - timedelta(days=1):
+                out.update(t.lower() for t in split_terms(h["topic"]))
                 out.add(h["topic"].strip().lower())   # 자료 부족으로 건너뛴 주제는 하루 쉬었다 재시도
         except (KeyError, ValueError):
             continue
@@ -41,13 +44,22 @@ def next_topics(cfg) -> list[str]:
     used = recent_topics(cfg.topic_cooldown_days)
     keywords = [k.strip() for k in cfg.keywords if k.strip()]
     random.shuffle(keywords)
-    candidates = [k for k in keywords if k.lower() not in used]
+    candidates = []
+    for k in keywords:
+        terms = split_terms(k)
+        if len(terms) > 1:      # 주제 묶음: 최근에 안 쓴 검색어 2~3개를 골라 한 편으로
+            fresh = [t for t in terms if t.lower() not in used] or terms
+            random.shuffle(fresh)
+            candidates.append(", ".join(fresh[:3]))
+        elif k.lower() not in used:
+            candidates.append(k)
 
     if cfg.use_google_trends:
         trends = google_trends_kr()
         if keywords:
             # 키워드와 관련된 트렌드를 앞쪽에 (예: 키워드 '전기차' + 트렌드 '전기차 보조금')
-            related = [t for t in trends if any(k.lower() in t.lower() or t.lower() in k.lower() for k in keywords)]
+            terms = [t for k in keywords for t in split_terms(k)]
+            related = [t for t in trends if any(k.lower() in t.lower() or t.lower() in k.lower() for k in terms)]
             candidates = related + candidates
         else:
             candidates += trends

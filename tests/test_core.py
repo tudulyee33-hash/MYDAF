@@ -143,11 +143,25 @@ def test_blocks_put_image_under_heading_and_credit_in_citations():
     assert blocks[-1]["lines"][-1] == "[사진] Kim, CC0, Wikimedia Commons"
 
 
-def test_keywords_split_on_commas():
+def test_keyword_bundles():
     from mydaf.config import Config, split_keywords
-    assert split_keywords([",초고층외관특성,도시ai자동화, 경관,", "경관\n차폐율"]) == ["초고층외관특성", "도시ai자동화", "경관", "차폐율"]
-    c = Config(keywords=["a, b", "c"])
-    assert c.keywords == ["a", "b", "c"]
+    assert split_keywords([",초고층외관특성,도시ai자동화, 경관,", "차폐율\n차폐율", ""]) == \
+        ["초고층외관특성, 도시ai자동화, 경관", "차폐율"]
+    assert Config(keywords=["a,b", "c"]).keywords == ["a, b", "c"]
+
+
+def test_bundle_topics_pick_fresh_terms(monkeypatch, tmp_path):
+    from mydaf import logs, topics
+    from mydaf.config import Config
+    hist = tmp_path / "h.jsonl"
+    hist.write_text('{"time": "2099-01-01T00:00:00", "topic": "a, b", "status": "draft"}\n', encoding="utf-8")
+    monkeypatch.setattr(logs, "history_path", lambda: hist)
+    monkeypatch.setattr(topics, "read_history", logs.read_history)
+    cfg = Config(keywords=["a, b, c, d, e"], use_google_trends=False)
+    for _ in range(10):
+        (cand,) = topics.next_topics(cfg)
+        terms = cand.split(", ")
+        assert 1 <= len(terms) <= 3 and not {"a", "b"} & set(terms)
 
 
 def test_naver_news_article_parsing():

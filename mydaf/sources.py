@@ -344,7 +344,19 @@ def kiss(query: str, limit: int) -> list[Source]:
 
 # ---------------------------------------------------------------- 전체 수집
 def collect(query: str, cfg, progress: Callable[[str], None] = lambda m: None) -> list[Source]:
-    n = cfg.max_items_per_source
+    """주제 묶음('a, b, c')이면 검색어마다 따로 찾아 합친다."""
+    terms = [t.strip() for t in re.split(r"[,;，、]+", query) if t.strip()]
+    if len(terms) > 1:
+        found: list[Source] = []
+        per = max(2, cfg.max_items_per_source // len(terms) + 1)
+        for t in terms:
+            progress(f"  [{t}]")
+            found += _collect_raw(t, cfg, progress, per)
+        return _finish(found, progress)
+    return _finish(_collect_raw(query, cfg, progress, cfg.max_items_per_source), progress)
+
+
+def _collect_raw(query: str, cfg, progress, n: int) -> list[Source]:
     jobs: list[tuple[str, Callable[[], list[Source]]]] = [
         ("네이버 뉴스", lambda: naver_news(query, cfg.naver_client_id, cfg.naver_client_secret, n)),
         ("구글 뉴스", lambda: google_news(query, n)),
@@ -364,7 +376,10 @@ def collect(query: str, cfg, progress: Callable[[str], None] = lambda m: None) -
         except Exception as e:  # 출처 하나가 실패해도 나머지는 계속
             progress(f"  · {name}: 실패 ({e.__class__.__name__})")
             log.warning("수집 실패 %s: %s", name, e)
+    return found
 
+
+def _finish(found: list[Source], progress) -> list[Source]:
     # 중복 제거 + 본문 보강
     unique, seen = [], set()
     for s in found:

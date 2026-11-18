@@ -27,15 +27,23 @@ HARD_DAILY_MAX = 3            # 하루 최대 글 수
 MIN_INTERVAL_FLOOR = 180      # 글 사이 최소 간격(분) = 3시간
 
 
+def split_terms(line: str) -> list[str]:
+    return [t.strip() for t in re.split(r"[,;，、]+", str(line)) if t.strip()]
+
+
 def split_keywords(items) -> list[str]:
-    """'a, b, c' 처럼 한 줄에 여러 개를 쉼표로 적어도 각각 하나의 주제로 나눈다."""
+    """키워드 목록 정리. 한 줄 = 한 주제(묶음). 쉼표로 이어 적은 줄은 '주제 묶음'으로 남겨 두고
+    (매번 그중 2~3개를 골라 한 편으로 엮는다), 빈 칸·중복만 정리한다."""
     if isinstance(items, str):
         items = [items]
     out, seen = [], set()
     for item in items or []:
-        for k in re.split(r"[,\n;，、]+", str(item)):
-            k = k.strip()
-            if k and k.lower() not in seen:
+        for line in str(item).splitlines():
+            terms = split_terms(line)
+            if not terms:
+                continue
+            k = ", ".join(terms)
+            if k.lower() not in seen:
                 seen.add(k.lower())
                 out.append(k)
     return out

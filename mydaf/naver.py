@@ -270,6 +270,8 @@ class NaverBlog:
         if shot_dir:
             p.screenshot(path=str(shot_dir / "editor.png"), full_page=True)
 
+        if callable(mode):          # 작성 중에 화면에서 '다 쓰면'을 바꿀 수 있어 이 순간에 읽는다
+            mode = mode()
         if mode == "publish":
             url = self._publish(p, f, tags, category, warnings)
             status = "published" if url else "unknown"
