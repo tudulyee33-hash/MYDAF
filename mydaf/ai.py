@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date
 
@@ -247,27 +248,40 @@ class GeminiWriter(Writer):
     max_source_chars = 4000           # 무료 한도(분당 토큰 수)에 맞춰 자료를 줄여서 보냄
     _last_call = 0.0
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash", style: str = "정보 전달형 전문가"):
+    def __init__(self, api_key: str, model: str = "gemini-flash-latest", style: str = "정보 전달형 전문가"):
         if not api_key:
             raise ValueError("Gemini API 키가 비어 있습니다. 설정에서 입력하세요.")
         self.api_key = api_key
-        self.model = model.strip() or "gemini-2.5-flash"
+        self.model = model.strip() or "gemini-flash-latest"
         self.style = STYLES.get(style, STYLES["정보 전달형 전문가"])
 
-    FALLBACK_MODEL = "gemini-2.5-flash"
+    on_model_change = None            # 모델이 바뀌면 설정에 저장하는 콜백
+
+    def available_models(self) -> list[str]:
+        """이 키로 쓸 수 있는 글쓰기용 모델 이름 (models/ 접두어 없이)."""
+        try:
+            r = requests.get("https://generativelanguage.googleapis.com/v1beta/models", params={"pageSize": 1000},
+                             headers={"x-goog-api-key": self.api_key}, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log.warning("Gemini 모델 목록 실패: %s", e)
+            return []
+        return [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
+                if "generateContent" in (m.get("supportedGenerationMethods") or [])]
 
     def _next_model(self) -> bool:
-        """설정한 모델 이름이 없을 때(404) 비슷한 이름 → 기본 모델 순으로 바꿔 본다."""
+        """설정한 모델이 이 키에 없을 때(404) 실제로 쓸 수 있는 모델을 골라 바꾼다."""
         tried = getattr(self, "_tried", set())
         tried.add(self.model)
         self._tried = tried
-        cands = ([] if self.model.endswith("-preview") else [self.model + "-preview"]) + [self.FALLBACK_MODEL]
-        for cand in cands:
-            if cand not in tried:
-                log.warning("Gemini 모델 '%s' 없음 → '%s' 로 바꿔 시도", self.model, cand)
-                self.model = cand
-                return True
-        return False
+        cand = pick_gemini_model(self.available_models(), self.model, exclude=tried)
+        if not cand:
+            return False
+        log.warning("Gemini 모델 '%s' 를 이 키로 쓸 수 없음 → '%s' 로 바꿔 시도", self.model, cand)
+        self.model = cand
+        if self.on_model_change:
+            self.on_model_change(cand)
+        return True
 
     def _wait_gap(self):
         gap = time.time() - GeminiWriter._last_call
@@ -305,7 +319,13 @@ class GeminiWriter(Writer):
             if r.status_code == 404 and self._next_model():
                 continue
             if r.status_code in (400, 401, 403, 404):
-                msg = r.json().get("error", {}).get("message", r.text[:200]) if r.text else r.status_code
+                try:
+                    msg = r.json().get("error", {}).get("message", r.text[:200])
+                except ValueError:
+                    msg = (r.text or "")[:200]
+                if r.status_code == 404:   # 맞는 모델을 못 찾음 → 주제를 바꿔도 같으니 멈춘다
+                    raise AIAccountError(f"Gemini 모델 '{self.model}' 을(를) 이 키로 쓸 수 없어요. "
+                                         "발행 설정의 Gemini 모델을 gemini-flash-latest 로 바꿔 주세요.")
                 raise RuntimeError(f"Gemini 요청 실패 ({r.status_code}): {msg}")
             r.raise_for_status()
             data = r.json()
@@ -318,6 +338,30 @@ class GeminiWriter(Writer):
             text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []) if not p.get("thought"))
             return json.loads(text)
         raise RuntimeError("Gemini 무료 사용 한도에 걸려 여러 번 실패했습니다. 잠시 후 다시 시도하세요.")
+
+
+def _version(name: str) -> tuple:
+    m = re.search(r"gemini-(\d+)(?:\.(\d+))?", name)
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+
+
+def pick_gemini_model(names: list[str], wanted: str = "", exclude=()) -> str | None:
+    """쓸 수 있는 모델 중 원래 고른 것과 가장 가까운 것: 같은 이름의 -preview → flash 최신 별칭 →
+    최신 정식 flash → 최신 flash(미리보기 포함). 이미지·음성·임베딩·lite 모델은 뺀다."""
+    names = [n for n in names if n not in exclude]
+    if not names:
+        return None
+    bad = ("image", "tts", "audio", "live", "embedding", "lite", "thinking", "exp", "robotics", "computer")
+    text = [n for n in names if n.startswith("gemini") and not any(b in n for b in bad)]
+    for n in (wanted + "-preview", "gemini-flash-latest"):
+        if n in text:
+            return n
+    flash = [n for n in text if "flash" in n]
+    stable = sorted((n for n in flash if "preview" not in n), key=_version, reverse=True)
+    if stable:
+        return stable[0]
+    flash.sort(key=_version, reverse=True)
+    return (flash or sorted(text, key=_version, reverse=True) or [None])[0]
 
 
 def _retry_delay(r) -> int | None:
@@ -334,5 +378,14 @@ def make_writer(cfg) -> Writer:
     if cfg.ai_provider == "claude":
         return ClaudeWriter(cfg.anthropic_api_key, cfg.model, cfg.effort, cfg.writer_style)
     if cfg.ai_provider == "gemini":
-        return GeminiWriter(cfg.gemini_api_key, cfg.gemini_model, cfg.writer_style)
+        w = GeminiWriter(cfg.gemini_api_key, cfg.gemini_model, cfg.writer_style)
+
+        def remember(model):
+            cfg.gemini_model = model
+            try:
+                cfg.save()
+            except OSError:
+                pass
+        w.on_model_change = remember
+        return w
     raise ValueError(f"지원하지 않는 AI 공급자: {cfg.ai_provider}")

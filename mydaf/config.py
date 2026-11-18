@@ -50,7 +50,7 @@ class Config:
     # AI
     ai_provider: str = "gemini"          # gemini(무료 키 가능) | claude
     gemini_api_key: str = ""             # aistudio.google.com 에서 무료 발급
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-latest"
     anthropic_api_key: str = ""
     model: str = "claude-opus-5-5"
     effort: str = "xhigh"           # 고품질: 깊게 생각하고 쓰기

@@ -96,7 +96,7 @@ def test_make_writer_picks_provider():
         assert "Gemini" in str(e)
 
 
-def test_gemini_unknown_model_falls_back(monkeypatch):
+def test_gemini_unknown_model_picks_available_one(monkeypatch):
     import mydaf.ai as ai
     calls = []
 
@@ -108,17 +108,52 @@ def test_gemini_unknown_model_falls_back(monkeypatch):
         def raise_for_status(self):
             pass
 
+    listing = {"models": [{"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                          {"name": "models/gemini-3.9-flash-preview", "supportedGenerationMethods": ["generateContent"]},
+                          {"name": "models/gemini-3.9-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+                          {"name": "models/gemini-embedding-2", "supportedGenerationMethods": ["embedContent"]}]}
+
     def post(url, **kw):
-        calls.append(url)
-        if "gemini-2.5-flash:" in url:
+        calls.append(url.split("/models/")[1].split(":")[0])
+        if calls[-1] == "gemini-3.8-flash":
             return R(200, {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}, "finishReason": "STOP"}]})
         return R(404, {"error": {"message": "not found"}})
 
     monkeypatch.setattr(ai.requests, "post", post)
+    monkeypatch.setattr(ai.requests, "get", lambda url, **kw: R(200, listing))
     monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
-    w = ai.GeminiWriter("k", model="gemini-3.1-pro")
+    from mydaf.config import Config
+    cfg = Config(gemini_api_key="k", gemini_model="gemini-2.5-flash")
+    monkeypatch.setattr(cfg, "save", lambda: None)
+    w = ai.make_writer(cfg)
     assert w._json("s", "u", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
-    assert [u.split("/models/")[1].split(":")[0] for u in calls] == ["gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash"]
+    assert calls == ["gemini-2.5-flash", "gemini-3.8-flash"] and cfg.gemini_model == "gemini-3.8-flash"
+
+
+def test_gemini_model_not_found_anywhere_stops(monkeypatch):
+    import pytest
+    import mydaf.ai as ai
+
+    class R:
+        status_code, text = 404, "x"
+        def json(self):
+            return {"error": {"message": "not found"}, "models": []}
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(ai.requests, "post", lambda url, **kw: R())
+    monkeypatch.setattr(ai.requests, "get", lambda url, **kw: R())
+    monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
+    with pytest.raises(ai.AIAccountError):
+        ai.GeminiWriter("k", "nope")._json("s", "u", {"type": "object", "properties": {}})
+
+
+def test_pick_gemini_model():
+    from mydaf.ai import pick_gemini_model
+    assert pick_gemini_model(["gemini-2.5-flash", "gemini-flash-latest"], "x") == "gemini-flash-latest"
+    assert pick_gemini_model(["gemini-3.1-pro-preview", "gemini-2.5-flash"], "gemini-3.1-pro") == "gemini-3.1-pro-preview"
+    assert pick_gemini_model(["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.7-flash-preview"]) == "gemini-3.6-flash"
+    assert pick_gemini_model([]) is None
 
 
 def test_gemini_credit_exhausted_is_account_error(monkeypatch):

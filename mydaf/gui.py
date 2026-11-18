@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -81,7 +81,7 @@ PAGES = {
     "publish": ("발행 설정", [
         ("ai_provider", "글 쓸 AI", "choice:gemini,claude", "gemini = 무료 키 가능, claude = 유료·최고품질"),
         ("gemini_api_key", "Gemini API 키", "secret", "aistudio.google.com 에서 무료 발급"),
-        ("gemini_model", "Gemini 모델", "combo:gemini-2.5-flash,gemini-2.5-pro,gemini-2.5-flash-lite",
+        ("gemini_model", "Gemini 모델", "combo:gemini-flash-latest,gemini-pro-latest,gemini-2.5-flash",
          "무료는 flash 권장 · 새 모델 이름을 직접 입력해도 됨"),
         ("anthropic_api_key", "Claude API 키", "secret", "console.anthropic.com 에서 발급"),
         ("model", "Claude 모델", "choice:claude-opus-5-5,claude-sonnet-5-5", "Opus 가 가장 고품질"),
