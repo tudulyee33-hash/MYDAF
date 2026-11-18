@@ -270,11 +270,11 @@ class GeminiWriter(Writer):
     max_source_chars = 8000           # 자료 1건당 보내는 글자 수 (무료 한도 안에서 넉넉히)
     _last_call = 0.0
 
-    def __init__(self, api_key: str, model: str = "gemini-flash-latest", style: str = "정보 전달형 전문가"):
+    def __init__(self, api_key: str, model: str = "gemini-3.5-flash", style: str = "정보 전달형 전문가"):
         if not api_key:
             raise ValueError("Gemini API 키가 비어 있습니다. 설정에서 입력하세요.")
         self.api_key = api_key
-        self.model = model.strip() or "gemini-flash-latest"
+        self.model = model.strip() or "gemini-3.5-flash"
         self.style = STYLES.get(style, STYLES["정보 전달형 전문가"])
 
     on_model_change = None            # 모델이 바뀌면 설정에 저장하는 콜백
@@ -291,8 +291,8 @@ class GeminiWriter(Writer):
         return [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
 
-    FAST_MODELS = ("gemini-3.5-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest",
-                   "gemini-3.5-flash-lite", "gemini-2.5-flash-lite")
+    FAST_MODELS = ("gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-flash-latest",
+                   "gemini-3.8-flash", "gemini-2.5-flash")
 
     def _models(self) -> list[str]:
         if getattr(self, "_avail", None) is None:
@@ -349,7 +349,13 @@ class GeminiWriter(Writer):
                     time.sleep(5)
                 continue
             low = (r.text or "").lower()
-            if r.status_code == 402 or (r.status_code == 429 and ("prepay" in low or "credit" in low or "billing" in low)):
+            if r.status_code == 402 or (r.status_code == 429 and "prepay" in low):
+                # 유료 전용 모델이면 402가 날 수 있어 무료로 되는 다른 모델부터 시도한다
+                log.warning("Gemini '%s' 결제 필요(402) → 무료로 되는 다른 모델을 찾아요", self.model)
+                paid = getattr(self, "_paid", 0) + 1
+                self._paid = paid
+                if paid <= 4 and self._next_model(busy=True):
+                    continue
                 raise AIAccountError(GEMINI_ACCOUNT_HINT["credit"])
             if r.status_code in (401, 403) or (r.status_code == 400 and "api key" in low):
                 raise AIAccountError(GEMINI_ACCOUNT_HINT["key"])
@@ -361,7 +367,9 @@ class GeminiWriter(Writer):
             if r.status_code == 429:
                 limited += 1
                 wait = min(_retry_delay(r) or 20, 60)
-                if limited >= 2 and self._next_model(busy=True):   # 모델마다 한도가 따로라 다른 모델로
+                # 모델마다 무료 한도가 따로라, 한도를 다 쓴 모델(quota)이면 바로 다른 모델로
+                if ("quota" in low or limited >= 2) and self._next_model(busy=True):
+                    log.warning("Gemini 이 모델의 무료 한도를 다 써서 다른 모델로 바꿨어요")
                     continue
                 log.warning("Gemini 분당 한도, %s초 후 다시", wait)
                 time.sleep(wait)

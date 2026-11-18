@@ -205,3 +205,31 @@ def test_gemini_busy_switches_fast_and_saves_only_on_success(monkeypatch):
     assert w._json("s", "u", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
     assert calls == ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-lite-latest"]
     assert saved == ["gemini-flash-lite-latest"]
+
+
+def test_quota_429_switches_model_not_credit_error(monkeypatch):
+    import mydaf.ai as ai
+    calls = []
+
+    class R:
+        def __init__(self, code, body=None, text="x"):
+            self.status_code, self._b, self.text = code, body or {}, text
+        def json(self):
+            return self._b
+        def raise_for_status(self):
+            pass
+
+    def post(url, **kw):
+        m = url.split("/models/")[1].split(":")[0]
+        calls.append(m)
+        if m == "gemini-flash-latest":
+            return R(429, text="You exceeded your current quota, please check your plan and billing details")
+        return R(200, {"candidates": [{"content": {"parts": [{"text": '{"ok": 1}'}]}, "finishReason": "STOP"}]})
+
+    listing = {"models": [{"name": f"models/{n}", "supportedGenerationMethods": ["generateContent"]}
+                          for n in ("gemini-flash-latest", "gemini-3.5-flash-lite")]}
+    monkeypatch.setattr(ai.requests, "post", post)
+    monkeypatch.setattr(ai.requests, "get", lambda url, **kw: R(200, listing))
+    monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
+    out = ai.GeminiWriter("k", "gemini-flash-latest")._json("s", "u", {"type": "object", "properties": {}})
+    assert out == {"ok": 1} and calls == ["gemini-flash-latest", "gemini-3.5-flash-lite"]
