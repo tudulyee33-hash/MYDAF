@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.5.6"
+VERSION = "1.5.7"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -320,7 +320,7 @@ class App:
         bar.pack_propagate(False)
         tk.Label(bar, text=title, bg=C["card"], fg=C["text"], font=F(16, "bold")).pack(side="left", padx=28)
         if right_widgets:
-            self.head_btn = Btn(bar, "새 글 쓰기", self.on_head_button, padx=18, pady=9)
+            self.head_btn = Btn(bar, "✎ 한 편 바로 쓰기", self.on_head_button, padx=18, pady=9)
             self.head_btn.pack(side="right", padx=(8, 24))
             self.view_btn = Btn(bar, "", self.on_toggle_view, kind="soft", size=9, padx=14, pady=8)
             self.view_btn.pack(side="right", padx=4)
@@ -340,7 +340,7 @@ class App:
         if self.runner.running or (self.runner.job and not self.runner.job.get("done")):
             self.head_btn.restyle("멈추기", "danger")
         else:
-            self.head_btn.restyle("새 글 쓰기", "primary")
+            self.head_btn.restyle("✎ 한 편 바로 쓰기", "primary")
 
     def on_head_button(self):
         if self.runner.running:
@@ -531,18 +531,8 @@ class App:
             self._quick_row(quick, label, cmd)
         tk.Frame(quick, bg=C["card"], height=10).pack()
 
-        # 오른쪽: 안전장치
-        safe = card(right, "안전장치")
-        safe.pack(fill="x", pady=(20, 0))
-        safe_lab = tk.Label(safe, justify="left", anchor="w", bg=C["card"], fg=C["muted"], font=F(9), wraplength=250,
-                 text=(f"하루 최대 {self.cfg.daily_limit}개 · 글 사이 {self.cfg.interval_min_minutes}~"
-                       f"{self.cfg.interval_max_minutes}분 · {self.cfg.active_start_hour}~{self.cfg.active_end_hour}시에만\n"
-                       f"검증된 사실 {self.cfg.min_verified_facts}개 이상, 본문 {self.cfg.min_post_chars}자 이상일 때만 등록")
-                 )
-        autowrap(safe_lab).pack(fill="x", padx=20, pady=(0, 16))
-
         # 오른쪽 아래 고정: 원클릭 자동 등록 (스크롤과 상관없이 항상 보이게 창 오른쪽 아래에 띄움)
-        tk.Frame(right, bg=C["bg"], height=250).pack(fill="x")      # 떠 있는 카드에 가리지 않게 자리 비움
+        tk.Frame(right, bg=C["bg"], height=300).pack(fill="x")      # 떠 있는 카드에 가리지 않게 자리 비움
         one = tk.Frame(self.main, bg=C["card"], highlightthickness=2, highlightbackground=C["primary"])
         one.place(relx=1.0, rely=1.0, anchor="se", x=-40, y=-20, width=330)
         tk.Label(one, text="원클릭 자동 등록", bg=C["card"], fg=C["text"], font=F(12, "bold"),
@@ -553,8 +543,13 @@ class App:
         self.one_desc.pack(fill="x", padx=20)
         tk.Label(one, text=f"다 쓰면: {mode}", bg=C["card"], fg=C["text"], font=F(9, "bold"),
                  anchor="w").pack(fill="x", padx=20, pady=(6, 0))
+        tk.Label(one, text=(f"안전장치: 하루 최대 {self.cfg.daily_limit}개 · 글 사이 {self.cfg.interval_min_minutes}~"
+                            f"{self.cfg.interval_max_minutes}분 · {self.cfg.active_start_hour}~{self.cfg.active_end_hour}시"),
+                 bg=C["card"], fg=C["muted"], font=F(8), anchor="w").pack(fill="x", padx=20, pady=(2, 0))
         self.big_btn = Btn(one, "▶  자동 등록 시작", self.on_toggle, size=13, pady=16)
-        self.big_btn.pack(fill="x", padx=20, pady=(10, 18))
+        self.big_btn.pack(fill="x", padx=20, pady=(10, 8))
+        Btn(one, "✎  한 편만 수동으로 쓰기", self.on_new_post, kind="soft", size=10, pady=8).pack(
+            fill="x", padx=20, pady=(0, 16))
         one.lift()
         self._refresh_home()
 
@@ -575,6 +570,8 @@ class App:
         self._jv = {}
         for w in self.job_area.winfo_children():
             w.destroy()
+        if mode in ("log", "result"):
+            self._build_idle_progress(self.job_area)
         if mode == "result":
             self._build_result_card(self.job_area, self.runner.job)
         if mode in ("log", "result"):
@@ -585,6 +582,57 @@ class App:
             self._render_log(self.home_log, self.log_lines[-40:])
             return
         self._build_job_view(self.job_area)
+
+    def _build_idle_progress(self, parent):
+        """작성 중이 아닐 때도 진행 그래프(원형·막대)를 항상 보여 준다: 시작 전 0%, 다음 글 대기, 방금 끝난 글 100%."""
+        jv = self._jv
+        row = tk.Frame(parent, bg=C["card"])
+        row.pack(fill="x", padx=20, pady=(14, 4))
+        jv["i_donut"] = tk.Canvas(row, width=120, height=120, bg=C["card"], highlightthickness=0)
+        jv["i_donut"].pack(side="left")
+        rt = tk.Frame(row, bg=C["card"])
+        rt.pack(side="left", fill="both", expand=True, padx=(18, 0))
+        jv["i_stage"] = tk.Label(rt, bg=C["card"], fg=C["text"], font=F(14, "bold"), anchor="w")
+        jv["i_stage"].pack(fill="x", pady=(14, 0))
+        jv["i_sub"] = tk.Label(rt, bg=C["card"], fg=C["muted"], font=F(9), anchor="w")
+        jv["i_sub"].pack(fill="x", pady=(2, 8))
+        jv["i_bar"] = tk.Canvas(rt, height=22, bg=C["card"], highlightthickness=0)
+        jv["i_bar"].pack(fill="x")
+        btns = tk.Frame(rt, bg=C["card"])
+        btns.pack(fill="x", pady=(10, 0))
+        Btn(btns, "✎  한 편 바로 쓰기 (수동)", self.on_new_post, size=10, padx=16, pady=7).pack(side="left")
+        jv["i_auto"] = Btn(btns, "▶  자동 등록 시작", self.on_toggle, kind="soft", size=10, padx=16, pady=7)
+        jv["i_auto"].pack(side="left", padx=8)
+
+    def _refresh_idle_progress(self):
+        jv = self._jv
+        if "i_donut" not in jv or not jv["i_donut"].winfo_exists():
+            return
+        job = self.runner.job
+        st = self.runner.state if self.runner.running else "idle"
+        if st == "waiting":
+            ok, reason, wait = self.runner.gate()
+            at = datetime.now() + timedelta(seconds=wait)
+            gap = (self.runner.next_gap_minutes or self.cfg.interval_min_minutes) * 60
+            pct = int(max(0, min(99, 100 * (1 - wait / gap)))) if gap and not ok else 0
+            stage, sub, cap = "다음 글 기다리는 중", f"{at:%m/%d %H:%M}에 다음 글을 써요 · {reason}", "대기"
+        elif job and job.get("done") and not job.get("dismissed"):
+            pct = 100 if job.get("status") in ("published", "draft") else display_pct(job)
+            stage = "방금 글 한 편을 마쳤어요" if pct == 100 else "방금 작업이 멈췄어요"
+            sub, cap = (job.get("title") or job.get("topic", ""))[:60], "완료" if pct == 100 else "중단"
+        elif self.runner.running:
+            pct, stage, sub, cap = 0, "주제를 고르는 중", "곧 자료 수집을 시작해요", "준비"
+        else:
+            pct, stage, cap = 0, "시작 전이에요", "시작 전"
+            sub = "오른쪽 아래 '자동 등록 시작' 또는 '한 편 바로 쓰기'를 누르면 진행률이 여기에 보여요."
+        draw_donut(jv["i_donut"], pct, 120, cap)
+        draw_bar(jv["i_bar"], pct, 22)
+        jv["i_stage"].configure(text=stage)
+        jv["i_sub"].configure(text=sub)
+        if self.runner.running:
+            jv["i_auto"].configure(text="■  자동 등록 멈추기")
+        else:
+            jv["i_auto"].configure(text="▶  자동 등록 시작")
 
     def _build_result_card(self, parent, job):
         st = job.get("status") or ""
@@ -851,6 +899,7 @@ class App:
         self._build_job_area()
         job = self.runner.job
         if self._job_area_mode != "job":
+            self._refresh_idle_progress()
             return
         from .runner import STEPS, remaining_seconds
         jv = self._jv
