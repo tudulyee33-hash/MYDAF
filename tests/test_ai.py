@@ -119,3 +119,18 @@ def test_gemini_unknown_model_falls_back(monkeypatch):
     w = ai.GeminiWriter("k", model="gemini-3.1-pro")
     assert w._json("s", "u", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
     assert [u.split("/models/")[1].split(":")[0] for u in calls] == ["gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash"]
+
+
+def test_gemini_credit_exhausted_is_account_error(monkeypatch):
+    import pytest
+    import mydaf.ai as ai
+
+    class R:
+        status_code, text = 402, '{"error":{"message":"Your prepayment credits are depleted."}}'
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(ai.requests, "post", lambda url, **kw: R())
+    monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
+    with pytest.raises(ai.AIAccountError, match="크레딧"):
+        ai.GeminiWriter("k")._json("s", "u", {"type": "object", "properties": {}})

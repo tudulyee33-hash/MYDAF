@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -930,6 +930,10 @@ class App:
             if getattr(self, "setup_login", None) is not None and self.setup_login.winfo_exists():
                 self.setup_login.configure(text=f"로그인 {self.login_state}")
             self._refresh_side()
+        if self.runner.ai_problem and self.runner.ai_problem != getattr(self, "_ai_problem_shown", ""):
+            self._ai_problem_shown = self.runner.ai_problem
+            messagebox.showwarning("MYDAF · AI 키 확인 필요", self.runner.ai_problem +
+                                   "\n\n자동 등록은 멈춰 두었어요. 키를 고친 뒤 다시 시작해 주세요.")
         self._refresh_home()
         self._refresh_job_area()
         self._refresh_job_box()

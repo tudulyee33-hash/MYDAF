@@ -201,41 +201,43 @@ def society(url: str, query: str, limit: int) -> list[Source]:
 
 
 # ---------------------------------------------------------------- KISS
-def parse_kiss_results(page_html: str, limit: int) -> list[Source]:
-    """KISS(한국학술정보) 검색 결과 파싱. 논문 본문은 유료이므로 제목·저자·학회지·초록만 쓴다."""
-    soup = BeautifulSoup(page_html, "html.parser")
-    out, seen = [], set()
-    for a in soup.select("a[href*='Detail/Ar'], a[href*='detail/ar'], a[href*='DetailOa/Ar']"):
-        link = urljoin("https://kiss.kstudy.com/", a["href"])
-        title = clean(a.get_text())
-        if not title or link in seen:
+KISS_DATA_URL = "https://kiss.kstudy.com/Search/Data"
+
+
+def _kiss_clean(text) -> str:
+    return clean(re.sub(r"<!H[SE]>", "", str(text or "")))
+
+
+def parse_kiss_data(data: dict, limit: int) -> list[Source]:
+    """KISS(한국학술정보) 검색 결과(JSON) 파싱. 논문 본문은 유료이므로 제목·저자·학회지·초록만 쓴다."""
+    out = []
+    for it in (data or {}).get("resultList") or []:
+        key = str(it.get("AKEYN") or "").strip()
+        title = _kiss_clean(it.get("TLKO") or it.get("TLTO"))
+        if not key or not title:
             continue
-        seen.add(link)
-        box = a.find_parent(["li", "tr", "div"])
-        info = clean(box.get_text(" ")) if box else title
-        out.append(Source("kiss", title, link, publisher="KISS 한국학술정보", text=info[:1500]))
+        abstract = _kiss_clean(it.get("KAST") or it.get("EAST"))
+        year = str(it.get("AYEAR") or "").strip()
+        info = " · ".join(x for x in (_kiss_clean(it.get("AUTH")), _kiss_clean(it.get("PNMEK")), year,
+                                       f"{it.get('VOL1') or ''}권 {it.get('NUM1') or ''}호".strip()) if x)
+        kw = _kiss_clean(it.get("KEYW"))
+        text = "\n".join(x for x in (info, ("키워드: " + kw) if kw else "", abstract) if x)
+        out.append(Source("kiss", title, f"https://kiss.kstudy.com/Detail/Ar?key={key}",
+                          publisher=_kiss_clean(it.get("PNMEK")) or "KISS 한국학술정보", published=year[:4],
+                          text=text[:MAX_TEXT], meta={"author": _kiss_clean(it.get("AUTH"))}))
         if len(out) >= limit:
             break
     return out
 
 
 def kiss(query: str, limit: int) -> list[Source]:
-    r = HTTP.get("https://kiss.kstudy.com/Search/Results", params={"query": query}, timeout=TIMEOUT)
+    r = HTTP.post(KISS_DATA_URL, timeout=TIMEOUT,
+                  json={"schList": f"all@$@total@$@{query}", "currentPage": 1,
+                        "pageRowCount": max(limit * 2, 10), "searchType": "PAGE"},
+                  headers={"Referer": "https://kiss.kstudy.com/Search/Result",
+                           "X-Requested-With": "XMLHttpRequest"})
     r.raise_for_status()
-    items = parse_kiss_results(r.text, limit)
-    for s in items:   # 상세 페이지의 초록
-        try:
-            d = BeautifulSoup(HTTP.get(s.url, timeout=TIMEOUT).text, "html.parser")
-            abstract = d.select_one(".abstract, #abstract, [class*='abstract'], [class*='Abstract']")
-            if abstract:
-                s.text = clean(abstract.get_text(" "))[:MAX_TEXT]
-            meta = {m.get("name"): m.get("content") for m in d.find_all("meta") if m.get("name")}
-            s.meta.update({k: meta[k] for k in ("citation_author", "citation_journal_title",
-                                                 "citation_publication_date") if meta.get(k)})
-            s.published = (s.meta.get("citation_publication_date") or "")[:10]
-        except requests.RequestException:
-            pass
-    return items
+    return parse_kiss_data(r.json(), limit)
 
 
 # ---------------------------------------------------------------- 전체 수집

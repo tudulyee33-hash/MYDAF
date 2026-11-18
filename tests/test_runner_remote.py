@@ -186,3 +186,19 @@ def test_display_pct_creeps_within_step_and_never_overshoots():
     job.update(done=True, pct=100)
     assert display_pct(job, now=t0) == 100
     assert display_pct(None) == 0
+
+
+def test_ai_account_error_stops_loop_and_is_not_counted(monkeypatch):
+    class Broke(FakeWriter):
+        def extract_facts(self, topic, sources):
+            raise runner_mod.ai.AIAccountError("Gemini 크레딧이 다 떨어졌어요.")
+    monkeypatch.setattr(runner_mod.ai, "make_writer", lambda cfg: Broke())
+    monkeypatch.setattr(runner_mod.sources, "collect", fake_collect)
+    cfg = Config(gemini_api_key="x", keywords=["a", "b", "c"], use_google_trends=False, **ALWAYS)
+    said = []
+    r = runner_mod.Runner(cfg, say=said.append)
+    r.start()
+    r.thread.join(timeout=10)
+    assert not r.running and "크레딧" in r.ai_problem
+    assert r.last_result["status"] == "ai_error" and r.posted_today() == 0
+    assert sum(m.startswith("⚠") for m in said) == 1    # 주제마다 반복하지 않고 한 번만

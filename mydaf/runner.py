@@ -51,6 +51,7 @@ class Runner:
         self.last_result: dict = {}
         self.next_gap_minutes: int | None = None
         self.job: dict | None = None      # 화면에 보여줄 현재 작업 진행 상황
+        self.ai_problem = ""              # AI 키·결제 문제 (화면 알림용)
 
     def step(self, idx: int, frac: float = 0.0, msg: str = ""):
         """진행 단계 갱신 (화면의 단계 표시·진행률 막대용)."""
@@ -81,6 +82,7 @@ class Runner:
         if self.running:
             return
         self._stop.clear()
+        self.ai_problem = ""
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
@@ -146,7 +148,7 @@ class Runner:
                     self.state = "running"
                     continue
                 result = self.run_once()
-                if result.get("status") not in COUNTED and not self._stop.is_set():
+                if result.get("status") not in COUNTED and not self._stop.is_set():  # ai_error 는 위에서 stop
                     retry = datetime.now() + timedelta(minutes=30)
                     self.state = "waiting"
                     self.say(f"이번엔 기준을 넘은 주제가 없어 {retry:%H:%M}에 다시 시도해요 (사유: "
@@ -179,7 +181,7 @@ class Runner:
                 break
             result = self._one(t, writer)
             self.last_result = result
-            if result["status"] in COUNTED or result["status"] == "blocked":
+            if result["status"] in COUNTED or result["status"] in ("blocked", "ai_error"):
                 return result
         return self.last_result
 
@@ -245,6 +247,13 @@ class Runner:
             (folder / "preview.html").write_text(render.preview_html(post["title"], blocks, post["tags"]),
                                                  encoding="utf-8")
             return self._post(record, folder, post, blocks, checked, review, cited)
+        except ai.AIAccountError as e:
+            log.error("AI 키·결제 문제: %s", e)
+            self.ai_problem = str(e)
+            self._stop.set()           # 다시 시도해도 같은 결과라 자동 등록을 멈춘다
+            self.say(f"⚠ {e}")
+            self.say("AI 키 문제가 해결될 때까지 자동 등록을 멈췄어요. 고친 뒤 다시 시작을 눌러 주세요.")
+            return self._skip(record, str(e), status="ai_error")
         except Exception as e:
             log.exception("작업 실패")
             return self._skip(record, f"{e.__class__.__name__}: {e}", status="error")

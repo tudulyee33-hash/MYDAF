@@ -86,11 +86,15 @@ def test_google_news_rss_parsing():
 
 
 def test_kiss_parsing():
-    page = """<ul><li><a href="/Detail/Ar?key=4011">전기차 확산 요인</a> 홍길동 · 교통연구 2025</li>
-              <li><a href="/Detail/Ar?key=4011">전기차 확산 요인</a></li></ul>"""
-    items = sources.parse_kiss_results(page, 5)
-    assert len(items) == 1 and items[0].url == "https://kiss.kstudy.com/Detail/Ar?key=4011"
-    assert "교통연구" in items[0].text
+    data = {"code": "200", "resultList": [
+        {"AKEYN": 2688024, "TLKO": "초고층 건물 <!HS>구급대<!HE> 수직이송시간", "AUTH": "홍길동", "AYEAR": "2008",
+         "VOL1": "12", "NUM1": "3", "PNMEK": "한국화재소방학회", "KAST": "초록 내용입니다.", "KEYW": "초고층"},
+        {"AKEYN": "", "TLKO": "키 없음"}]}
+    items = sources.parse_kiss_data(data, 5)
+    assert len(items) == 1 and items[0].url == "https://kiss.kstudy.com/Detail/Ar?key=2688024"
+    assert items[0].title == "초고층 건물 구급대 수직이송시간"
+    assert "초록 내용입니다." in items[0].text and "한국화재소방학회" in items[0].text
+    assert items[0].published == "2008"
 
 
 def test_article_text_extraction():

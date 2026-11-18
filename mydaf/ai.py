@@ -133,6 +133,17 @@ REVISE_SYSTEM = """당신은 깐깐한 블로그 편집장입니다. 초안을 �
 규칙은 초안 작성 규칙과 같습니다. 출처·URL 은 본문에 쓰지 마세요."""
 
 
+class AIAccountError(RuntimeError):
+    """키·결제 문제라 다시 시도해도 안 되는 오류. 자동 등록을 멈추고 사용자에게 알린다."""
+
+
+GEMINI_ACCOUNT_HINT = {
+    "credit": "Gemini 크레딧이 다 떨어졌어요. AI Studio(aistudio.google.com)에서 충전하거나, "
+              "결제 연결이 없는 프로젝트에서 새 무료 키를 만들어 '발행 설정'에 넣어 주세요.",
+    "key": "Gemini API 키가 맞지 않거나 권한이 없어요. AI Studio에서 키를 다시 확인해 주세요.",
+}
+
+
 class Writer:
     """공통: 프롬프트 구성. 공급자별로 _json(system, user, schema) 만 구현한다."""
     style = STYLES["정보 전달형 전문가"]
@@ -193,7 +204,13 @@ class ClaudeWriter(Writer):
                 **kwargs, betas=["server-side-fallback-2026-07-01"], fallbacks="default"
             ) as stream:
                 msg = stream.get_final_message()
+        except anthropic.AuthenticationError:
+            raise AIAccountError("Claude API 키가 맞지 않아요. 발행 설정에서 키를 확인해 주세요.")
+        except anthropic.PermissionDeniedError:
+            raise AIAccountError("Claude API 키에 권한이 없어요. console.anthropic.com 에서 확인해 주세요.")
         except anthropic.BadRequestError as e:
+            if "credit" in str(e).lower() or "billing" in str(e).lower():
+                raise AIAccountError("Claude API 크레딧이 부족해요. console.anthropic.com 에서 충전해 주세요.")
             log.info("fallbacks 미지원 모델로 보임, 기본 요청으로 재시도: %s", e)
             with self.client.messages.stream(**kwargs) as stream:
                 msg = stream.get_final_message()
@@ -275,6 +292,11 @@ class GeminiWriter(Writer):
                 log.warning("Gemini 연결 실패 (%s회): %s", attempt + 1, e)
                 time.sleep(20 * (attempt + 1))
                 continue
+            low = (r.text or "").lower()
+            if r.status_code == 402 or (r.status_code == 429 and ("prepay" in low or "credit" in low or "billing" in low)):
+                raise AIAccountError(GEMINI_ACCOUNT_HINT["credit"])
+            if r.status_code in (401, 403) or (r.status_code == 400 and "api key" in low):
+                raise AIAccountError(GEMINI_ACCOUNT_HINT["key"])
             if r.status_code == 429 or r.status_code >= 500:
                 wait = _retry_delay(r) or 30 * (attempt + 1)
                 log.warning("Gemini 한도/일시 오류 %s, %s초 후 재시도", r.status_code, wait)
