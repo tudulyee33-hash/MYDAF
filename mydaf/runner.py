@@ -147,7 +147,12 @@ class Runner:
                     continue
                 result = self.run_once()
                 if result.get("status") not in COUNTED and not self._stop.is_set():
+                    retry = datetime.now() + timedelta(minutes=30)
+                    self.state = "waiting"
+                    self.say(f"이번엔 기준을 넘은 주제가 없어 {retry:%H:%M}에 다시 시도해요 (사유: "
+                             f"{result.get('reason') or result.get('status')})")
                     self._stop.wait(1800)     # 쓸 만한 주제가 없으면 30분 뒤 다시
+                    self.state = "running"
         finally:
             self.state = "idle"
             self.say("■ 연속 실행 정지")
@@ -160,7 +165,11 @@ class Runner:
             return {"status": "blocked", "reason": reason}
         cfg = self.cfg
         writer = ai.make_writer(cfg)
+        if not topic:
+            self.say("주제를 고르는 중 (키워드" + (" + 구글 트렌드)" if cfg.use_google_trends else ")"))
         candidates = [topic] if topic else topics.next_topics(cfg)
+        if candidates and not topic:
+            self.say("이번 후보: " + ", ".join(candidates[:5]))
         if not candidates:
             self.say("쓸 주제가 없습니다. 키워드를 추가하거나 구글 트렌드를 켜세요.")
             return {"status": "no_topic"}

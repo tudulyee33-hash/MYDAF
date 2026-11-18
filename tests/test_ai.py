@@ -94,3 +94,28 @@ def test_make_writer_picks_provider():
         ai.make_writer(Config(ai_provider="gemini", gemini_api_key=""))
     except ValueError as e:
         assert "Gemini" in str(e)
+
+
+def test_gemini_unknown_model_falls_back(monkeypatch):
+    import mydaf.ai as ai
+    calls = []
+
+    class R:
+        def __init__(self, code, body):
+            self.status_code, self._b, self.text = code, body, "x"
+        def json(self):
+            return self._b
+        def raise_for_status(self):
+            pass
+
+    def post(url, **kw):
+        calls.append(url)
+        if "gemini-2.5-flash:" in url:
+            return R(200, {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}, "finishReason": "STOP"}]})
+        return R(404, {"error": {"message": "not found"}})
+
+    monkeypatch.setattr(ai.requests, "post", post)
+    monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
+    w = ai.GeminiWriter("k", model="gemini-3.1-pro")
+    assert w._json("s", "u", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
+    assert [u.split("/models/")[1].split(":")[0] for u in calls] == ["gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash"]

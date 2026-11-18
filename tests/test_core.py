@@ -137,3 +137,10 @@ def test_blocks_put_image_under_heading_and_credit_in_citations():
     assert kinds == ["para", "heading", "image", "para", "heading", "para", "para", "citations"]
     assert blocks[1]["size"] == 34 and blocks[1]["style"] == "quote" and blocks[0]["size"] == 30
     assert blocks[-1]["lines"][-1] == "[사진] Kim, CC0, Wikimedia Commons"
+
+
+def test_keywords_split_on_commas():
+    from mydaf.config import Config, split_keywords
+    assert split_keywords([",초고층외관특성,도시ai자동화, 경관,", "경관\n차폐율"]) == ["초고층외관특성", "도시ai자동화", "경관", "차폐율"]
+    c = Config(keywords=["a, b", "c"])
+    assert c.keywords == ["a", "b", "c"]

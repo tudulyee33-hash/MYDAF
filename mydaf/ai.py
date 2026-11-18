@@ -237,6 +237,21 @@ class GeminiWriter(Writer):
         self.model = model.strip() or "gemini-2.5-flash"
         self.style = STYLES.get(style, STYLES["정보 전달형 전문가"])
 
+    FALLBACK_MODEL = "gemini-2.5-flash"
+
+    def _next_model(self) -> bool:
+        """설정한 모델 이름이 없을 때(404) 비슷한 이름 → 기본 모델 순으로 바꿔 본다."""
+        tried = getattr(self, "_tried", set())
+        tried.add(self.model)
+        self._tried = tried
+        cands = ([] if self.model.endswith("-preview") else [self.model + "-preview"]) + [self.FALLBACK_MODEL]
+        for cand in cands:
+            if cand not in tried:
+                log.warning("Gemini 모델 '%s' 없음 → '%s' 로 바꿔 시도", self.model, cand)
+                self.model = cand
+                return True
+        return False
+
     def _wait_gap(self):
         gap = time.time() - GeminiWriter._last_call
         if gap < self.MIN_GAP_SECONDS:
@@ -264,6 +279,8 @@ class GeminiWriter(Writer):
                 wait = _retry_delay(r) or 30 * (attempt + 1)
                 log.warning("Gemini 한도/일시 오류 %s, %s초 후 재시도", r.status_code, wait)
                 time.sleep(min(wait, 120))
+                continue
+            if r.status_code == 404 and self._next_model():
                 continue
             if r.status_code in (400, 401, 403, 404):
                 msg = r.json().get("error", {}).get("message", r.text[:200]) if r.text else r.status_code

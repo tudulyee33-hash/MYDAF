@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import sys
 from dataclasses import asdict, dataclass, field, fields
@@ -24,6 +25,20 @@ def app_dir() -> Path:
 # 네이버 저품질·이용 제한 위험을 줄이기 위한 고정 안전장치 (설정 화면·원격으로도 넘을 수 없음)
 HARD_DAILY_MAX = 3            # 하루 최대 글 수
 MIN_INTERVAL_FLOOR = 180      # 글 사이 최소 간격(분) = 3시간
+
+
+def split_keywords(items) -> list[str]:
+    """'a, b, c' 처럼 한 줄에 여러 개를 쉼표로 적어도 각각 하나의 주제로 나눈다."""
+    if isinstance(items, str):
+        items = [items]
+    out, seen = [], set()
+    for item in items or []:
+        for k in re.split(r"[,\n;，、]+", str(item)):
+            k = k.strip()
+            if k and k.lower() not in seen:
+                seen.add(k.lower())
+                out.append(k)
+    return out
 
 
 @dataclass
@@ -102,6 +117,7 @@ class Config:
 
     def clamp(self) -> None:
         """안전장치: 한도·간격은 고정 기준을 넘지 못하게 맞춘다."""
+        self.keywords = split_keywords(self.keywords)
         self.daily_limit = max(1, min(int(self.daily_limit), HARD_DAILY_MAX))
         self.interval_min_minutes = max(int(self.interval_min_minutes), MIN_INTERVAL_FLOOR)
         self.interval_max_minutes = max(int(self.interval_max_minutes), self.interval_min_minutes)

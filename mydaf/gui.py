@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -46,7 +46,7 @@ STATUS_CHIP = {
 # (설정키, 화면 이름, 종류, 도움말)  종류: str | secret | int | bool | lines | choice:a,b
 PAGES = {
     "keywords": ("키워드", [
-        ("keywords", "키워드", "lines", "한 줄에 하나씩. 개수·길이 제한 없음"),
+        ("keywords", "키워드", "lines", "한 줄에 하나씩 (쉼표로 구분해도 돼요). 개수·길이 제한 없음"),
         ("use_google_trends", "구글 트렌드에서 주제 자동 발굴", "bool", "오늘 뜨는 검색어 중 내 키워드와 관련된 것을 우선"),
         ("topic_cooldown_days", "같은 주제 재사용 금지(일)", "int", "최근에 쓴 주제는 이 기간 동안 다시 쓰지 않음"),
     ]),
@@ -283,6 +283,8 @@ class App:
                 "바탕화면 정리",
                 "바탕화면 MYDAF 아이콘을 설치된 프로그램에 연결했어요.\n\n"
                 f"지금 실행한 원본 파일은 지우고 아이콘 하나만 남길까요?\n({info['original']})"):
+            if _INSTANCE_LOCK is not None:
+                _INSTANCE_LOCK.close()        # 설치된 프로그램이 바로 켜질 수 있게
             install.handoff_and_remove_original(info["original"])
             self.root.destroy()
 
@@ -939,5 +941,29 @@ class App:
         self.root.mainloop()
 
 
+_INSTANCE_LOCK = None
+
+
+def single_instance(port: int = 47613) -> bool:
+    """MYDAF 가 이미 켜져 있으면 False. 두 개가 동시에 돌면 하루 한도·간격이 꼬일 수 있다."""
+    global _INSTANCE_LOCK
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        s.listen(1)
+    except OSError:
+        s.close()
+        return False
+    _INSTANCE_LOCK = s
+    return True
+
+
 def main():
+    if not single_instance():
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("MYDAF", "MYDAF 가 이미 실행 중이에요.\n작업 표시줄에서 열려 있는 창을 확인해 주세요.")
+        root.destroy()
+        return
     App().run()
