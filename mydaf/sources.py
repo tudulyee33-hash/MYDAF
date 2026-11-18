@@ -14,11 +14,19 @@ from email.utils import parsedate_to_datetime
 from typing import Callable
 from urllib.parse import quote, urljoin, urlparse
 
-import feedparser
 import requests
-from bs4 import BeautifulSoup
 
 from .logs import log
+
+
+def _soup(markup, parser="html.parser"):
+    from bs4 import BeautifulSoup     # 필요할 때만 불러와 시작을 빠르게
+    return BeautifulSoup(markup, parser)
+
+
+def _feedparse(data):
+    import feedparser
+    return feedparser.parse(data)
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
@@ -80,7 +88,7 @@ def _date(value: str) -> str:
 
 def extract_article_text(page_html: str) -> str:
     """기사/페이지 HTML에서 본문 텍스트만 추린다."""
-    soup = BeautifulSoup(page_html, "html.parser")
+    soup = _soup(page_html, "html.parser")
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form", "iframe"]):
         tag.decompose()
     candidates = soup.select("article, #articleBodyContents, #dic_area, #newsct_article, .article_body, "
@@ -111,7 +119,7 @@ NAVER_ARTICLE = re.compile(r"https?://n\.news\.naver\.com/(?:mnews/)?article/(\d
 
 def parse_naver_article(page_html: str, url: str) -> Source | None:
     """네이버 뉴스(n.news.naver.com) 기사 한 건: 제목·언론사·날짜·본문."""
-    soup = BeautifulSoup(page_html, "html.parser")
+    soup = _soup(page_html, "html.parser")
     body = soup.select_one("#dic_area, #newsct_article, #articeBody")
     title_el = soup.select_one("#title_area, h2.media_end_head_headline, .media_end_head_headline")
     title = clean(title_el.get_text(" ")) if title_el else ""
@@ -188,7 +196,7 @@ def naver_news(query: str, client_id: str, client_secret: str, limit: int) -> li
 
 
 def parse_google_news_rss(xml: str, limit: int) -> list[Source]:
-    feed = feedparser.parse(xml)
+    feed = _feedparse(xml)
     out = []
     for e in feed.entries[:limit]:
         publisher = getattr(getattr(e, "source", None), "title", "") or ""
@@ -267,7 +275,7 @@ def google_search(query: str, api_key: str, cx: str, limit: int) -> list[Source]
 
 # ---------------------------------------------------------------- RSS / 학회
 def rss(feed_url: str, query: str, limit: int, kind: str = "rss") -> list[Source]:
-    feed = feedparser.parse(HTTP.get(feed_url, timeout=TIMEOUT).content)
+    feed = _feedparse(HTTP.get(feed_url, timeout=TIMEOUT).content)
     words = [w for w in re.split(r"\s+", query.lower()) if len(w) > 1]
     out = []
     for e in feed.entries:
@@ -289,7 +297,7 @@ def society(url: str, query: str, limit: int) -> list[Source]:
     ctype = r.headers.get("content-type", "")
     if "xml" in ctype or r.text.lstrip().startswith("<?xml") or "<rss" in r.text[:500]:
         return rss(url, query, limit, kind="society")
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = _soup(r.text, "html.parser")
     site = clean(soup.title.get_text()) if soup.title else urlparse(url).netloc
     words = [w for w in re.split(r"\s+", query) if len(w) > 1]
     out, seen = [], set()

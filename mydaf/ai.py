@@ -13,7 +13,6 @@ import re
 import time
 from datetime import date
 
-import anthropic
 import requests
 
 from .logs import log
@@ -207,12 +206,14 @@ class ClaudeWriter(Writer):
                  style: str = "정보 전달형 전문가"):
         if not api_key:
             raise ValueError("Claude API 키가 비어 있습니다. 설정에서 입력하세요.")
+        import anthropic          # 무거운 모듈(약 1.5초) — Claude 를 쓸 때만 불러온다
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3)
         self.model = model
         self.effort = effort
         self.style = STYLES.get(style, STYLES["정보 전달형 전문가"])
 
     def _json(self, system: str, user: str, schema: dict) -> dict:
+        import anthropic
         kwargs = dict(
             model=self.model,
             max_tokens=32000,

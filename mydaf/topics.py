@@ -5,18 +5,17 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta
 
-import feedparser
 
 from .config import split_terms
 from .logs import log, read_history
-from .sources import HTTP, TIMEOUT, clean
+from .sources import HTTP, TIMEOUT, _feedparse, clean
 
 
 def google_trends_kr(limit: int = 20) -> list[str]:
     try:
         r = HTTP.get("https://trends.google.com/trending/rss?geo=KR", timeout=TIMEOUT)
         r.raise_for_status()
-        return [clean(e.get("title", "")) for e in feedparser.parse(r.text).entries[:limit] if e.get("title")]
+        return [clean(e.get("title", "")) for e in _feedparse(r.text).entries[:limit] if e.get("title")]
     except Exception as e:
         log.warning("구글 트렌드 실패: %s", e)
         return []

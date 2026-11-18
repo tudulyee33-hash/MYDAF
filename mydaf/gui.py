@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.5.7"
+VERSION = "1.5.8"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -276,13 +276,15 @@ class App:
             return tk.Label(parent, text="M", bg=C["primary"], fg="white", font=F(14, "bold"), width=3)
 
     def _startup_login_check(self):
-        """켤 때 저장된 네이버 로그인이 살아 있는지 화면 없이 확인 (상단 '로그인 확인 전'이 계속 남지 않게)."""
-        from .naver import PROFILE
-        if not PROFILE.exists():
-            self.login_state = "필요"
-            return
+        """켤 때 저장된 네이버 로그인이 살아 있는지 확인. 쿠키 파일만 읽어 즉시 끝내고,
+        판단이 안 될 때만 화면 없는 브라우저로 확인한다 (켤 때 메모리·시간 절약)."""
+        from .logincheck import quick_login_state
 
         def job():
+            state = quick_login_state()
+            if state is not None:
+                self.login_state = "됨" if state else "필요"
+                return
             if self.runner.running:
                 return
             try:
@@ -291,23 +293,11 @@ class App:
                     ok = nb.is_logged_in()
                 self.login_state = "됨" if ok else "필요"
             except Exception as e:
-                log_msg = f"네이버 로그인 자동 확인 실패: {e.__class__.__name__}"
-                self.msgs.put(log_msg)
+                self.msgs.put(f"네이버 로그인 자동 확인 실패: {e.__class__.__name__}")
         threading.Thread(target=job, daemon=True).start()
 
     def _startup_install(self):
-        info = install.startup_check(app_dir())
-        if not info:
-            return
-        self.msgs.put(f"바탕화면 MYDAF 아이콘을 연결했습니다: {info['shortcut']}")
-        if messagebox.askyesno(
-                "바탕화면 정리",
-                "바탕화면 MYDAF 아이콘을 설치된 프로그램에 연결했어요.\n\n"
-                f"지금 실행한 원본 파일은 지우고 아이콘 하나만 남길까요?\n({info['original']})"):
-            if _INSTANCE_LOCK is not None:
-                _INSTANCE_LOCK.close()        # 설치된 프로그램이 바로 켜질 수 있게
-            install.handoff_and_remove_original(info["original"])
-            self.root.destroy()
+        threading.Thread(target=install.startup_check, args=(app_dir(),), daemon=True).start()
 
     def clear_main(self):
         for w in self.main.winfo_children():

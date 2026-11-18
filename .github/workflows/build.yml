@@ -26,14 +26,16 @@ jobs:
         run: |
           python -c "import mydaf.gui"
           python -m pytest -q tests
-      - name: 실행파일 만들기
-        run: pyinstaller --noconfirm --onefile --windowed --name MYDAF --icon assets/mydaf.ico --add-data "assets;assets" --collect-all playwright run_mydaf.py
+      - name: 실행파일 만들기 (폴더형 — 켤 때 압축 풀기 없음)
+        run: pyinstaller --noconfirm --onedir --windowed --name MYDAF --icon assets/mydaf.ico --add-data "assets;assets" --collect-all playwright run_mydaf.py
+      - name: 설치 파일 만들기
+        run: pyinstaller --noconfirm --onefile --windowed --name MYDAF-Setup --icon assets/mydaf.ico --add-data "dist/MYDAF;payload" --distpath setup-dist --workpath setup-build setup_mydaf.py
       - uses: actions/upload-artifact@v4
         with:
           name: MYDAF-windows
-          path: dist/MYDAF.exe
+          path: setup-dist/MYDAF-Setup.exe
       - name: 릴리스 (v 태그일 때)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/MYDAF.exe
+          files: setup-dist/MYDAF-Setup.exe
