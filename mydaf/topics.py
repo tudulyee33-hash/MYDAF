@@ -47,10 +47,11 @@ def next_topics(cfg) -> list[str]:
     candidates = []
     for k in keywords:
         terms = split_terms(k)
-        if len(terms) > 1:      # 주제 묶음: 최근에 안 쓴 검색어 2~3개를 골라 한 편으로
-            fresh = [t for t in terms if t.lower() not in used] or terms
+        if len(terms) > 1:      # 주제 묶음: 첫 검색어(중심 주제) + 최근에 안 쓴 검색어 2개
+            head, rest = terms[0], terms[1:]
+            fresh = [t for t in rest if t.lower() not in used] or rest
             random.shuffle(fresh)
-            candidates.append(", ".join(fresh[:3]))
+            candidates.append(", ".join([head] + fresh[:2]))
         elif k.lower() not in used:
             candidates.append(k)
 

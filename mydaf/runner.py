@@ -422,6 +422,9 @@ class Runner:
 
     def _skip(self, record: dict, reason: str, status: str = "skipped") -> dict:
         record.update(status=status, reason=reason)
+        if self.job and "step_times" not in record:
+            record.update(step_times=list(self.job.get("step_times") or []),
+                          elapsed=int(time.time() - self.job["started"]))
         add_history(record)
         self.say(f"[{record['topic']}] 건너뜀: {reason}")
         return record

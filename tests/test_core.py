@@ -161,7 +161,7 @@ def test_bundle_topics_pick_fresh_terms(monkeypatch, tmp_path):
     for _ in range(10):
         (cand,) = topics.next_topics(cfg)
         terms = cand.split(", ")
-        assert 1 <= len(terms) <= 3 and not {"a", "b"} & set(terms)
+        assert terms[0] == "a" and len(terms) == 3 and "b" not in terms[1:]
 
 
 def test_naver_news_article_parsing():

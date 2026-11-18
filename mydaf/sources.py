@@ -354,11 +354,16 @@ def collect(query: str, cfg, progress: Callable[[str], None] = lambda m: None) -
     """주제 묶음('a, b, c')이면 검색어마다 따로 찾아 합친다."""
     terms = [t.strip() for t in re.split(r"[,;，、]+", query) if t.strip()]
     if len(terms) > 1:
+        # 중심 주제로 넉넉히 찾아 같은 소식을 다룬 여러 매체를 확보하고(교차 검증용),
+        # 나머지 검색어는 '중심 주제 + 검색어'로 붙여 찾아 엉뚱한 분야 기사가 섞이지 않게 한다.
+        head, rest = terms[0], terms[1:]
         found: list[Source] = []
-        per = max(2, cfg.max_items_per_source // len(terms) + 1)
-        for t in terms:
-            progress(f"  [{t}]")
-            found += _collect_raw(t, cfg, progress, per)
+        progress(f"  [{head}]")
+        found += _collect_raw(head, cfg, progress, max(cfg.max_items_per_source, 6))
+        for t in rest:
+            q = f"{head} {t}"
+            progress(f"  [{q}]")
+            found += _collect_raw(q, cfg, progress, max(3, cfg.max_items_per_source // 2))
         return _finish(found, progress)
     return _finish(_collect_raw(query, cfg, progress, cfg.max_items_per_source), progress)
 
