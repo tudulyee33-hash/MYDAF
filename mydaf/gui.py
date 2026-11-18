@@ -17,9 +17,9 @@ from . import install
 from .config import HARD_DAILY_MAX, MIN_INTERVAL_FLOOR, Config, app_dir
 from .logs import POST_DIR, read_history
 from .remote import RemoteControl
-from .runner import COUNTED, Runner
+from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -158,6 +158,42 @@ def autowrap(label):
     """라벨 폭에 맞춰 자동 줄바꿈."""
     label.bind("<Configure>", lambda e: label.configure(wraplength=max(e.width - 4, 50)))
     return label
+
+
+def draw_donut(cv: tk.Canvas, pct: int, size: int, caption: str = ""):
+    """원형(도넛) 진행률 그래프. 가운데 큰 % 숫자."""
+    cv.delete("all")
+    pad, width = 10, 14
+    box = (pad, pad, size - pad, size - pad)
+    cv.create_oval(*box, outline=C["line"], width=width)
+    if pct >= 100:
+        cv.create_oval(*box, outline=C["primary"], width=width)
+    elif pct > 0:
+        cv.create_arc(*box, start=90, extent=-3.6 * pct, style="arc", outline=C["primary"], width=width)
+    cv.create_text(size / 2, size / 2 - (8 if caption else 0), text=f"{pct}%", fill=C["text"], font=F(22, "bold"))
+    if caption:
+        cv.create_text(size / 2, size / 2 + 22, text=caption, fill=C["muted"], font=F(8))
+
+
+def draw_bar(cv: tk.Canvas, pct: int, height: int):
+    """두꺼운 진행 막대. 막대 안에 % 표시."""
+    cv.delete("all")
+    w = max(cv.winfo_width(), 50)
+    r = height / 2
+    def pill(x1, color):
+        if x1 - 0 < height:
+            cv.create_oval(0, 0, height, height, fill=color, outline=color)
+            return
+        cv.create_oval(0, 0, height, height, fill=color, outline=color)
+        cv.create_oval(x1 - height, 0, x1, height, fill=color, outline=color)
+        cv.create_rectangle(r, 0, x1 - r, height, fill=color, outline=color)
+    pill(w, C["line"])
+    if pct > 0:
+        pill(max(w * pct / 100, height), C["primary"])
+    fill_end = w * pct / 100
+    inside = fill_end > 60
+    cv.create_text(fill_end - 10 if inside else fill_end + 10, r, text=f"{pct}%",
+                   anchor="e" if inside else "w", fill="white" if inside else C["primary_dk"], font=F(10, "bold"))
 
 
 def hline(parent):
@@ -361,13 +397,16 @@ class App:
             if not self.job_box.winfo_ismapped():
                 self.job_box.pack(fill="x", pady=(0, 10), before=self.remote_box)
             from .runner import STEPS
-            self.job_pct.configure(text=f"{job['pct']}%")
+            pct = display_pct(job)
+            self.job_pct.configure(text=f"{pct}%")
+            self.root.title(f"MYDAF · 작성 중 {pct}%")
             self.job_sub.configure(text=f"{job['topic'][:14]} · {STEPS[job['step']]}")
             w = max(self.job_bar.winfo_width(), 1)
             self.job_bar.delete("all")
-            self.job_bar.create_rectangle(0, 0, w * job["pct"] / 100, 4, fill=C["primary"], width=0)
+            self.job_bar.create_rectangle(0, 0, w * pct / 100, 4, fill=C["primary"], width=0)
         elif self.job_box.winfo_ismapped():
             self.job_box.pack_forget()
+            self.root.title("MYDAF")
 
     def _refresh_side(self):
         on = self.cfg.remote_enabled and self.cfg.remote_url
@@ -500,14 +539,18 @@ class App:
         note = tk.Label(a, text="네이버 편집기에 입력하는 동안에는 블로그 창을 닫지 마세요.", bg=C["warn_bg"],
                         fg=C["warn"], font=F(9), anchor="w", padx=12, pady=8)
         note.pack(fill="x", padx=20, pady=(8, 8))
-        pr = tk.Frame(a, bg=C["card"])
-        pr.pack(fill="x", padx=20)
-        self.job_stage = tk.Label(pr, bg=C["card"], fg=C["text"], font=F(10, "bold"))
-        self.job_stage.pack(side="left")
-        self.job_pct_big = tk.Label(pr, bg=C["card"], fg=C["primary_dk"], font=F(10, "bold"))
-        self.job_pct_big.pack(side="right")
-        self.job_bar_big = tk.Canvas(a, height=8, bg=C["line"], highlightthickness=0)
-        self.job_bar_big.pack(fill="x", padx=20, pady=(6, 10))
+        prog = tk.Frame(a, bg=C["card"])
+        prog.pack(fill="x", padx=20, pady=(4, 8))
+        self.job_donut = tk.Canvas(prog, width=150, height=150, bg=C["card"], highlightthickness=0)
+        self.job_donut.pack(side="left")
+        right = tk.Frame(prog, bg=C["card"])
+        right.pack(side="left", fill="both", expand=True, padx=(18, 0))
+        self.job_stage = tk.Label(right, bg=C["card"], fg=C["text"], font=F(14, "bold"), anchor="w")
+        self.job_stage.pack(fill="x", pady=(14, 0))
+        self.job_stage_sub = tk.Label(right, bg=C["card"], fg=C["muted"], font=F(9), anchor="w")
+        self.job_stage_sub.pack(fill="x", pady=(2, 10))
+        self.job_bar_big = tk.Canvas(right, height=26, bg=C["card"], highlightthickness=0)
+        self.job_bar_big.pack(fill="x")
         chips = tk.Frame(a, bg=C["card"])
         chips.pack(fill="x", padx=20)
         self.job_chips = []
@@ -534,11 +577,11 @@ class App:
         sec = int(time.time() - job["started"])
         self.job_elapsed.configure(text=f"{sec // 60}분 {sec % 60:02d}초 경과")
         self.job_topic.configure(text=job["topic"])
-        self.job_stage.configure(text=STEPS[job["step"]])
-        self.job_pct_big.configure(text=f"{job['pct']}%")
-        w = max(self.job_bar_big.winfo_width(), 1)
-        self.job_bar_big.delete("all")
-        self.job_bar_big.create_rectangle(0, 0, w * job["pct"] / 100, 8, fill=C["primary"], width=0)
+        pct = display_pct(job)
+        self.job_stage.configure(text=f"{STEPS[job['step']]} 중")
+        self.job_stage_sub.configure(text=f"{len(STEPS)}단계 중 {job['step'] + 1}단계 · 전체 진행률 {pct}%")
+        draw_donut(self.job_donut, pct, 150, f"{job['step'] + 1}/{len(STEPS)} 단계")
+        draw_bar(self.job_bar_big, pct, 26)
         for i, c in enumerate(self.job_chips):
             if i < job["step"]:
                 c.configure(bg=C["primary_bg"], fg=C["primary_dk"], text="✓ " + STEPS[i])

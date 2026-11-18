@@ -172,3 +172,17 @@ def test_remote_server_roundtrip():
         assert "MYDAF" in page and "d" in page
     finally:
         srv.terminate()
+
+
+def test_display_pct_creeps_within_step_and_never_overshoots():
+    from mydaf.runner import display_pct
+    t0 = 1000.0
+    job = {"step": 2, "pct": 30, "started": t0, "step_started": t0, "done": False}
+    assert display_pct(job, now=t0) == 30
+    mid = display_pct(job, now=t0 + 90)
+    assert 30 < mid < 55
+    late = display_pct(job, now=t0 + 10_000)
+    assert mid <= late < 55          # 다음 단계 시작 전엔 그 단계 끝을 넘지 않음
+    job.update(done=True, pct=100)
+    assert display_pct(job, now=t0) == 100
+    assert display_pct(None) == 0

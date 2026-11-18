@@ -23,6 +23,22 @@ COUNTED = {"published", "draft", "unknown", "draft_failed", "naver_error"}
 POST_LOCK = threading.Lock()          # 동시에 두 편이 올라가지 않게
 STEPS = ["자료 수집", "사실 검증", "원고 작성", "이미지 준비", "에디터 작성", "저장 확인"]
 STEP_PCT = [(0, 15), (15, 30), (30, 55), (55, 65), (65, 95), (95, 100)]
+STEP_EXPECTED_SEC = [60, 90, 180, 40, 180, 10]      # 단계별 대략 걸리는 시간 (화면 진행률용)
+
+
+def display_pct(job: dict | None, now: float | None = None) -> int:
+    """화면에 보여줄 진행률. AI 작성처럼 오래 걸리는 단계에서도 숫자가 멈춰 보이지 않게
+    단계 안에서 예상 시간에 맞춰 조금씩 올리되, 다음 단계 시작점은 넘지 않는다."""
+    if not job:
+        return 0
+    if job.get("done"):
+        return 100 if job.get("pct", 0) >= 95 else job.get("pct", 0)
+    idx = job.get("step", 0)
+    lo, hi = STEP_PCT[idx]
+    started = job.get("step_started", job.get("started", now or time.time()))
+    elapsed = max(0.0, (now or time.time()) - started)
+    creep = lo + (hi - lo) * min(0.9, elapsed / STEP_EXPECTED_SEC[idx])
+    return int(min(max(job.get("pct", 0), creep), max(hi - 1, lo) if job.get("pct", 0) < hi else hi))
 
 
 class Runner:
@@ -41,7 +57,10 @@ class Runner:
         if self.job is None:
             return
         lo, hi = STEP_PCT[idx]
-        self.job.update(step=idx, pct=int(lo + (hi - lo) * max(0.0, min(frac, 1.0))))
+        if self.job.get("step") != idx or "step_started" not in self.job:
+            self.job["step_started"] = time.time()
+        pct = int(lo + (hi - lo) * max(0.0, min(frac, 1.0)))
+        self.job.update(step=idx, pct=max(pct, self.job.get("pct", 0)))
         if msg:
             self.job["events"].append((datetime.now().strftime("%H:%M:%S"), msg))
             self.job["events"] = self.job["events"][-50:]
