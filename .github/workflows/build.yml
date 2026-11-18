@@ -25,7 +25,7 @@ jobs:
       - name: 테스트
         run: |
           python -c "import mydaf.gui"
-          pytest -q tests
+          python -m pytest -q tests
       - name: 실행파일 만들기
         run: pyinstaller --noconfirm --onefile --windowed --name MYDAF --collect-all playwright run_mydaf.py
       - uses: actions/upload-artifact@v4
