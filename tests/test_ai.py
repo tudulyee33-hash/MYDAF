@@ -150,7 +150,9 @@ def test_gemini_model_not_found_anywhere_stops(monkeypatch):
 
 def test_pick_gemini_model():
     from mydaf.ai import pick_gemini_model
-    assert pick_gemini_model(["gemini-2.5-flash", "gemini-flash-latest"], "x") == "gemini-flash-latest"
+    assert pick_gemini_model(["gemini-3.8-flash", "gemini-flash-latest"], "x") == "gemini-3.8-flash"
+    assert pick_gemini_model(["gemini-flash-latest", "gemini-3-flash-preview"], "x") == "gemini-flash-latest"
+    assert pick_gemini_model(["gemini-3.8-flash", "gemini-3.5-flash"], "x", suggested="gemini-3.5-flash") == "gemini-3.5-flash"
     assert pick_gemini_model(["gemini-3.1-pro-preview", "gemini-2.5-flash"], "gemini-3.1-pro") == "gemini-3.1-pro-preview"
     assert pick_gemini_model(["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.7-flash-preview"]) == "gemini-3.6-flash"
     assert pick_gemini_model([]) is None

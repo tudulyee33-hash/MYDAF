@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,7 +49,8 @@ class Source:
         if site:
             host = urlparse(site).netloc.lower()
             return host[4:] if host.startswith("www.") else host
-        if self.domain in ("news.google.com", "") and self.publisher:
+        if self.domain in ("news.google.com", "n.news.naver.com", "m.news.naver.com", "news.naver.com", "") \
+                and self.publisher:
             return self.publisher.strip().lower()
         return self.domain
 
@@ -104,10 +106,73 @@ def fetch_text(url: str) -> str:
 
 
 # ---------------------------------------------------------------- 뉴스
+NAVER_ARTICLE = re.compile(r"https?://n\.news\.naver\.com/(?:mnews/)?article/(\d+)/(\d+)")
+
+
+def parse_naver_article(page_html: str, url: str) -> Source | None:
+    """네이버 뉴스(n.news.naver.com) 기사 한 건: 제목·언론사·날짜·본문."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    body = soup.select_one("#dic_area, #newsct_article, #articeBody")
+    title_el = soup.select_one("#title_area, h2.media_end_head_headline, .media_end_head_headline")
+    title = clean(title_el.get_text(" ")) if title_el else ""
+    if not title:
+        og = soup.find("meta", property="og:title")
+        title = clean(og.get("content", "")) if og else ""
+    if not (body and title):
+        return None
+    for tag in body.select("script, style, .img_desc, em.img_desc, .end_photo_org, .media_end_summary"):
+        tag.decompose()
+    press = ""
+    logo = soup.select_one(".media_end_head_top_logo img, .media_end_head_top_logo_img")
+    if logo is not None:
+        press = clean(logo.get("alt") or logo.get("title") or "")
+    if not press:
+        m = soup.find("meta", attrs={"name": "twitter:creator"}) or soup.find("meta", property="og:article:author")
+        press = clean(m.get("content", "")).split("|")[0].strip() if m else ""
+    date_el = soup.select_one("[data-date-time]")
+    published = (date_el.get("data-date-time") or "")[:10] if date_el else ""
+    original = soup.select_one("a.media_end_head_origin_link")
+    meta = {"original_url": original.get("href")} if original is not None and original.get("href") else {}
+    return Source("news", title, url, publisher=press, published=published,
+                  text=re.sub(r"\s+", " ", body.get_text(" ", strip=True))[:MAX_TEXT], meta=meta)
+
+
+def naver_article_links(search_html: str, limit: int) -> list[str]:
+    seen, out = set(), []
+    for m in NAVER_ARTICLE.finditer(search_html.replace("\\/", "/")):
+        url = f"https://n.news.naver.com/mnews/article/{m.group(1)}/{m.group(2)}"
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def naver_news_web(query: str, limit: int) -> list[Source]:
+    """API 키가 없을 때: 네이버 뉴스 검색 화면에서 '네이버뉴스' 기사 링크를 찾아 본문까지 가져온다."""
+    r = HTTP.get("https://search.naver.com/search.naver",
+                 params={"where": "news", "query": query, "sort": "0"}, timeout=TIMEOUT)
+    r.raise_for_status()
+    out = []
+    for url in naver_article_links(r.text, limit * 2):
+        try:
+            a = HTTP.get(url, timeout=TIMEOUT)
+            a.raise_for_status()
+            src = parse_naver_article(a.text, url)
+        except requests.RequestException:
+            continue
+        if src:
+            out.append(src)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def naver_news(query: str, client_id: str, client_secret: str, limit: int) -> list[Source]:
-    """네이버 검색 API(뉴스). developers.naver.com 에서 무료 발급."""
+    """네이버 검색 API(뉴스, developers.naver.com 무료 발급). 키가 없으면 검색 화면에서 가져온다."""
     if not (client_id and client_secret):
-        return []
+        return naver_news_web(query, limit)
     r = HTTP.get("https://openapi.naver.com/v1/search/news.json",
                  params={"query": query, "display": min(limit * 2, 50), "sort": "sim"},
                  headers={"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret},
@@ -135,6 +200,34 @@ def parse_google_news_rss(xml: str, limit: int) -> list[Source]:
                           published=_date(e.get("published", "")), text=clean(e.get("summary", "")),
                           meta={"publisher_site": src_url}))
     return out
+
+
+def decode_google_news_url(url: str) -> str:
+    """news.google.com/rss/articles/... 링크를 원래 기사 주소로 바꾼다. 실패하면 ''."""
+    m = re.search(r"/(?:rss/)?articles/([^/?#]+)", url)
+    if "news.google.com" not in url or not m:
+        return ""
+    art_id = m.group(1)
+    try:
+        page = HTTP.get(f"https://news.google.com/rss/articles/{art_id}", timeout=TIMEOUT).text
+        sig = re.search(r'data-n-a-sg="([^"]+)"', page)
+        ts = re.search(r'data-n-a-ts="([^"]+)"', page)
+        if not (sig and ts):
+            return ""
+        inner = ["garturlreq", [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None,
+                                 None, 0, 1], "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
+                 art_id, int(ts.group(1)), sig.group(1)]
+        freq = json.dumps([[["Fa2Xvd", json.dumps(inner), None, "generic"]]])
+        r = HTTP.post("https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                      data={"f.req": freq}, timeout=TIMEOUT,
+                      headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        r.raise_for_status()
+        payload = json.loads(r.text.split("\n\n", 1)[1])
+        found = json.loads(payload[0][2])[1]
+        return found if isinstance(found, str) and found.startswith("http") else ""
+    except (requests.RequestException, ValueError, IndexError, TypeError, KeyError) as e:
+        log.info("구글 뉴스 주소 풀기 실패: %s", e)
+        return ""
 
 
 def google_news(query: str, limit: int) -> list[Source]:
@@ -275,9 +368,25 @@ def collect(query: str, cfg, progress: Callable[[str], None] = lambda m: None) -
         unique.append(s)
     for s in unique:
         if s.kind in ("news", "google", "rss", "society") and len(s.text) < 600:
-            body = fetch_text(s.url)
+            url = s.url
+            if s.domain == "news.google.com":
+                real = decode_google_news_url(s.url)
+                if real:
+                    s.meta["google_news_url"] = s.url
+                    s.url = url = real          # 출처 표기도 원래 기사 주소로
+            if NAVER_ARTICLE.match(url):
+                try:
+                    art = parse_naver_article(HTTP.get(url, timeout=TIMEOUT).text, url)
+                except requests.RequestException:
+                    art = None
+                body = art.text if art else ""
+            else:
+                body = fetch_text(url) if "news.google.com" not in url else ""
             if len(body) > len(s.text):
                 s.text = body
+    thin = [s for s in unique if s.kind == "news" and len(s.text) < 200]
+    if thin:
+        progress(f"  · 본문을 못 가져온 기사 {len(thin)}건 (제목만 있음)")
     for i, s in enumerate(unique, 1):
         s.id = f"S{i}"
         if not s.published:

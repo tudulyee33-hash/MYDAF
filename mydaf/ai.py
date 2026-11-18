@@ -269,12 +269,12 @@ class GeminiWriter(Writer):
         return [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
 
-    def _next_model(self) -> bool:
+    def _next_model(self, suggested: str = "") -> bool:
         """설정한 모델이 이 키에 없을 때(404) 실제로 쓸 수 있는 모델을 골라 바꾼다."""
         tried = getattr(self, "_tried", set())
         tried.add(self.model)
         self._tried = tried
-        cand = pick_gemini_model(self.available_models(), self.model, exclude=tried)
+        cand = pick_gemini_model(self.available_models(), self.model, exclude=tried, suggested=suggested)
         if not cand:
             return False
         log.warning("Gemini 모델 '%s' 를 이 키로 쓸 수 없음 → '%s' 로 바꿔 시도", self.model, cand)
@@ -297,7 +297,8 @@ class GeminiWriter(Writer):
                                  "responseSchema": to_gemini_schema(schema),
                                  "maxOutputTokens": 32000},
         }
-        for attempt in range(5):
+        busy = 0
+        for attempt in range(6):
             self._wait_gap()
             try:
                 r = requests.post(self.URL.format(model=self.model), json=body, timeout=300,
@@ -311,13 +312,21 @@ class GeminiWriter(Writer):
                 raise AIAccountError(GEMINI_ACCOUNT_HINT["credit"])
             if r.status_code in (401, 403) or (r.status_code == 400 and "api key" in low):
                 raise AIAccountError(GEMINI_ACCOUNT_HINT["key"])
+            if r.status_code == 503:
+                busy += 1
+                if busy >= 2 and self._next_model():     # 모델이 붐비면 기다리지 말고 다른 모델로
+                    log.warning("Gemini 모델이 붐벼서 '%s' 로 바꿔요", self.model)
+                    busy = 0
+                    continue
             if r.status_code == 429 or r.status_code >= 500:
                 wait = _retry_delay(r) or 30 * (attempt + 1)
                 log.warning("Gemini 한도/일시 오류 %s, %s초 후 재시도", r.status_code, wait)
                 time.sleep(min(wait, 120))
                 continue
-            if r.status_code == 404 and self._next_model():
-                continue
+            if r.status_code == 404:
+                hint = re.search(r"models/(gemini[\w.\-]+)", (r.text or "").split("use", 1)[-1]) if "use" in (r.text or "") else None
+                if self._next_model(hint.group(1) if hint else ""):
+                    continue
             if r.status_code in (400, 401, 403, 404):
                 try:
                     msg = r.json().get("error", {}).get("message", r.text[:200])
@@ -345,21 +354,23 @@ def _version(name: str) -> tuple:
     return (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
 
 
-def pick_gemini_model(names: list[str], wanted: str = "", exclude=()) -> str | None:
-    """쓸 수 있는 모델 중 원래 고른 것과 가장 가까운 것: 같은 이름의 -preview → flash 최신 별칭 →
-    최신 정식 flash → 최신 flash(미리보기 포함). 이미지·음성·임베딩·lite 모델은 뺀다."""
+def pick_gemini_model(names: list[str], wanted: str = "", exclude=(), suggested: str = "") -> str | None:
+    """쓸 수 있는 모델 중 고른다: Google이 오류에서 권한 모델 → 같은 이름의 -preview →
+    번호가 가장 높은 정식 flash → flash 최신 별칭 → 미리보기 flash. 이미지·음성·임베딩·lite 는 뺀다."""
     names = [n for n in names if n not in exclude]
     if not names:
         return None
     bad = ("image", "tts", "audio", "live", "embedding", "lite", "thinking", "exp", "robotics", "computer")
     text = [n for n in names if n.startswith("gemini") and not any(b in n for b in bad)]
-    for n in (wanted + "-preview", "gemini-flash-latest"):
-        if n in text:
+    for n in (suggested, wanted + "-preview"):
+        if n and n in text:
             return n
     flash = [n for n in text if "flash" in n]
-    stable = sorted((n for n in flash if "preview" not in n), key=_version, reverse=True)
+    stable = sorted((n for n in flash if "preview" not in n and "latest" not in n), key=_version, reverse=True)
     if stable:
         return stable[0]
+    if "gemini-flash-latest" in text:
+        return "gemini-flash-latest"
     flash.sort(key=_version, reverse=True)
     return (flash or sorted(text, key=_version, reverse=True) or [None])[0]
 

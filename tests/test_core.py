@@ -148,3 +148,20 @@ def test_keywords_split_on_commas():
     assert split_keywords([",초고층외관특성,도시ai자동화, 경관,", "경관\n차폐율"]) == ["초고층외관특성", "도시ai자동화", "경관", "차폐율"]
     c = Config(keywords=["a, b", "c"])
     assert c.keywords == ["a", "b", "c"]
+
+
+def test_naver_news_article_parsing():
+    search = '<a href="https://n.news.naver.com/mnews/article/001/0015000001?sid=101">네이버뉴스</a>' \
+             '<a href="https:\\/\\/n.news.naver.com\\/mnews\\/article\\/020\\/0003600002">x</a>' \
+             '<a href="https://n.news.naver.com/mnews/article/001/0015000001">dup</a>'
+    links = sources.naver_article_links(search, 5)
+    assert links == ["https://n.news.naver.com/mnews/article/001/0015000001",
+                     "https://n.news.naver.com/mnews/article/020/0003600002"]
+    page = """<html><div class="media_end_head_top_logo"><img alt="연합뉴스"></div>
+      <h2 id="title_area"><span>초고층 건축물 재난대응 점검</span></h2>
+      <span data-date-time="2026-11-18 09:00:00">x</span>
+      <article id="dic_area">소방청은 18일 전국 초고층 건축물 120곳을 점검한다고 밝혔다. <em class="img_desc">사진</em></article></html>"""
+    s = sources.parse_naver_article(page, links[0])
+    assert s.title == "초고층 건축물 재난대응 점검" and s.publisher == "연합뉴스"
+    assert s.published == "2026-11-18" and "120곳" in s.text and "사진" not in s.text
+    assert s.outlet == "연합뉴스"
