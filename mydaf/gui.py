@@ -7,8 +7,10 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
+from . import install
 from .config import Config, app_dir
 from .remote import RemoteControl
 from .runner import Runner
@@ -72,9 +74,22 @@ class App:
         self.root.title(f"MYDAF {VERSION} · 로컬 네이버 블로그 자동 포스팅")
         self.root.geometry("900x680")
         self.vars: dict[str, object] = {}
+        self._set_icon()
         self._build()
         self.remote.start()
+        made = install.first_run_setup(app_dir())
+        if made:
+            self.msgs.put(f"바탕화면에 MYDAF 아이콘을 만들었습니다: {made}")
         self.root.after(300, self._pump)
+
+    def _set_icon(self):
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+        ico = base / "assets" / "mydaf.ico"
+        try:
+            if ico.exists() and sys.platform == "win32":
+                self.root.iconbitmap(default=str(ico))
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------ 화면 구성
     def _build(self):
@@ -91,6 +106,7 @@ class App:
         ttk.Button(bar, text="한 편만 실행", command=self.on_once).pack(side="left", padx=4)
         ttk.Button(bar, text="네이버 로그인", command=self.on_login).pack(side="left", padx=12)
         ttk.Button(bar, text="기록 폴더 열기", command=self.on_open_folder).pack(side="left", padx=4)
+        ttk.Button(bar, text="바탕화면 아이콘 만들기", command=self.on_shortcut).pack(side="left", padx=4)
         self.status = tk.StringVar(value="대기 중")
         ttk.Label(run, textvariable=self.status).pack(anchor="w", padx=6)
         self.log = scrolledtext.ScrolledText(run, height=30, state="disabled", font=("Malgun Gothic", 10))
@@ -178,6 +194,13 @@ class App:
             self.msgs.put("네이버 로그인 확인됨." if ok else "로그인 확인 실패.")
         self.on_save(quiet=True)
         threading.Thread(target=job, daemon=True).start()
+
+    def on_shortcut(self):
+        try:
+            path = install.install_and_shortcut()
+            self.msgs.put(f"바탕화면에 MYDAF 아이콘을 만들었습니다: {path}")
+        except Exception as e:
+            messagebox.showerror("아이콘 만들기 실패", str(e))
 
     def on_open_folder(self):
         path = str(app_dir())
