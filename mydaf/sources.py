@@ -217,6 +217,8 @@ def parse_kiss_data(data: dict, limit: int) -> list[Source]:
         if not key or not title:
             continue
         abstract = _kiss_clean(it.get("KAST") or it.get("EAST"))
+        if len(abstract) < 100:      # 초록 없는 논문은 근거로 쓸 내용이 없어 뺀다
+            continue
         year = str(it.get("AYEAR") or "").strip()
         info = " · ".join(x for x in (_kiss_clean(it.get("AUTH")), _kiss_clean(it.get("PNMEK")), year,
                                        f"{it.get('VOL1') or ''}권 {it.get('NUM1') or ''}호".strip()) if x)
