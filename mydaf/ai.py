@@ -145,6 +145,24 @@ class AIBusyError(RuntimeError):
     """AI 서버 혼잡으로 이번엔 못 씀. 다른 주제로 넘어가지 않고 잠시 뒤 다시 시도한다."""
 
 
+class AIQuotaError(AIBusyError):
+    """무료 하루 한도를 모든 모델에서 다 씀. 주제를 버리지 않고 한도가 다시 차는 시각까지 기다린다."""
+
+    def __init__(self, msg: str, retry_at):
+        super().__init__(msg)
+        self.retry_at = retry_at
+
+
+def gemini_quota_reset(now=None):
+    """Gemini 무료 하루 한도는 미국 태평양 시간 자정에 다시 찬다 → UTC 08:05 로 잡는다(서머타임이면 1시간 여유)."""
+    from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    reset = now.replace(hour=8, minute=5, second=0, microsecond=0)
+    if reset <= now:
+        reset += timedelta(days=1)
+    return reset.astimezone()
+
+
 class AIAccountError(RuntimeError):
     """키·결제 문제라 다시 시도해도 안 되는 오류. 자동 등록을 멈추고 사용자에게 알린다."""
 
@@ -338,6 +356,8 @@ class GeminiWriter(Writer):
         }
         start_model = self.model
         limited = 0
+        daily = getattr(self, "_daily_out", set())
+        self._daily_out = daily
         for attempt in range(8):
             self._wait_gap()
             t0 = time.time()
@@ -368,6 +388,15 @@ class GeminiWriter(Writer):
             if r.status_code == 429:
                 limited += 1
                 wait = min(_retry_delay(r) or 20, 60)
+                if "perday" in low.replace("_", "").replace("-", ""):
+                    daily.add(self.model)          # 이 모델은 오늘 무료 한도 끝
+                    if not self._next_model(busy=True):
+                        reset = gemini_quota_reset()
+                        raise AIQuotaError(
+                            f"Gemini 무료 하루 한도를 모두 썼어요. 주제는 그대로 두고 {reset:%m/%d %H:%M}에 "
+                            "자동으로 다시 시작해요.", reset)
+                    log.warning("Gemini '%s' 오늘 무료 한도 끝 → 다른 모델로", next(iter(daily)))
+                    continue
                 # 모델마다 무료 한도가 따로라, 한도를 다 쓴 모델(quota)이면 바로 다른 모델로
                 if ("quota" in low or limited >= 2) and self._next_model(busy=True):
                     log.warning("Gemini 이 모델의 무료 한도를 다 써서 다른 모델로 바꿨어요")
@@ -401,6 +430,10 @@ class GeminiWriter(Writer):
             if self.model != start_model and self.on_model_change:
                 self.on_model_change(self.model)        # 실제로 된 모델만 설정에 저장
             return json.loads(text)
+        if daily:
+            reset = gemini_quota_reset()
+            raise AIQuotaError(f"Gemini 무료 하루 한도를 모두 썼어요. 주제는 그대로 두고 {reset:%m/%d %H:%M}에 "
+                               "자동으로 다시 시작해요.", reset)
         raise AIBusyError("Gemini 서버가 혼잡해서 여러 모델로 시도해도 응답을 받지 못했어요. 잠시 뒤 다시 시도해요.")
 
 

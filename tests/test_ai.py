@@ -233,3 +233,32 @@ def test_quota_429_switches_model_not_credit_error(monkeypatch):
     monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
     out = ai.GeminiWriter("k", "gemini-flash-latest")._json("s", "u", {"type": "object", "properties": {}})
     assert out == {"ok": 1} and calls == ["gemini-flash-latest", "gemini-3.5-flash-lite"]
+
+
+def test_daily_quota_waits_for_reset(monkeypatch):
+    import mydaf.ai as ai
+
+    class R:
+        status_code = 429
+        text = '{"error": {"details": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}'
+        headers = {}
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(ai.requests, "post", lambda url, **kw: R())
+    monkeypatch.setattr(ai.requests, "get", lambda url, **kw: type("L", (), {"status_code": 200, "json": lambda s: {
+        "models": [{"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]}]},
+        "raise_for_status": lambda s: None})())
+    monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
+    monkeypatch.setattr(ai.time, "sleep", lambda s: None)
+    import pytest
+    with pytest.raises(ai.AIQuotaError) as e:
+        ai.GeminiWriter("k", "gemini-3.5-flash")._json("s", "u", {"type": "object", "properties": {}})
+    assert e.value.retry_at is not None
+
+
+def test_quota_reset_time():
+    from datetime import datetime, timezone
+    import mydaf.ai as ai
+    r = ai.gemini_quota_reset(datetime(2026, 11, 18, 9, 0, tzinfo=timezone.utc))
+    assert r.astimezone(timezone.utc) == datetime(2026, 11, 19, 8, 5, tzinfo=timezone.utc)

@@ -43,6 +43,14 @@ def copy_payload(src: Path, dest: Path) -> None:
     install.strip_mark_of_web(dest / "MYDAF.exe")
 
 
+def payload_version() -> str:
+    try:
+        from mydaf.gui import VERSION
+        return VERSION
+    except Exception:
+        return ""
+
+
 def main() -> None:
     root = tk.Tk()
     root.withdraw()
@@ -70,8 +78,9 @@ def main() -> None:
         return
     win.destroy()
     subprocess.Popen([str(exe)], cwd=str(dest), creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-    messagebox.showinfo("MYDAF 설치", "설치가 끝났어요. 이제 바탕화면의 MYDAF 아이콘으로 켜시면 됩니다.\n\n"
-                                       "이 설치 파일은 지워도 됩니다.")
+    messagebox.showinfo("MYDAF 설치", f"MYDAF {payload_version()} 설치가 끝났어요. 이제 바탕화면의 MYDAF 아이콘으로 켜시면 됩니다.\n\n"
+                                       "이 설치 파일과 예전에 받은 MYDAF.exe 는 지워 주세요.\n"
+                                       "(예전 MYDAF.exe 를 다시 켜면 옛 버전으로 덮어써질 수 있어요.)")
 
 
 if __name__ == "__main__":

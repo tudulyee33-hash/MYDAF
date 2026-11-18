@@ -227,6 +227,12 @@ class Runner:
                 result = self.run_once()
                 if result.get("status") not in COUNTED and not self._stop.is_set():  # ai_error 는 위에서 stop
                     mins = 10 if result.get("status") == "ai_busy" else 30
+                    if result.get("retry_at"):          # 무료 하루 한도 → 다시 찰 때까지
+                        try:
+                            at = datetime.fromisoformat(result["retry_at"]).replace(tzinfo=None)
+                            mins = max(10, (at - datetime.now()).total_seconds() / 60)
+                        except ValueError:
+                            pass
                     retry = datetime.now() + timedelta(minutes=mins)
                     self.state = "waiting"
                     self.say(f"이번엔 기준을 넘은 주제가 없어 {retry:%H:%M}에 다시 시도해요 (사유: "
@@ -369,7 +375,10 @@ class Runner:
         except ai.AIBusyError as e:
             log.warning("AI 혼잡: %s", e)
             self.say(f"⚠ {e}")
-            return self._skip(record, str(e), status="ai_busy")
+            res = self._skip(record, str(e), status="ai_busy")
+            if isinstance(e, ai.AIQuotaError):
+                res["retry_at"] = e.retry_at.isoformat(timespec="minutes")
+            return res
         except Exception as e:
             log.exception("작업 실패")
             return self._skip(record, f"{e.__class__.__name__}: {e}", status="error")
