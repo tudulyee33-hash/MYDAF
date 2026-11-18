@@ -102,14 +102,29 @@ WRITE_SYSTEM = """당신은 네이버 블로그 전문 작가입니다. 검증�
   본문 문장 자체도 '~로 보인다', '~할 가능성이 있다'처럼 단정하지 않는 표현을 쓰세요.
 - 추론이 아닌 문단은 is_inference=false, inference_reasoning 은 빈 문자열.
 - 제목은 검색에 잘 걸리도록 주제 키워드를 앞쪽에, 40자 이내. 과장·낚시 금지.
-- 구성: 도입(intro) → 소제목 3~5개(각 2~4문단) → 마무리(conclusion). 전체 1,500~2,500자.
+- 구성: 도입(intro) → 소제목 4~6개(각 2~4문단) → 마무리(conclusion). 전체 2,200~3,500자.
+- 고품질 기준: 독자가 궁금해할 질문(무엇이 바뀌나, 누구에게 영향, 언제부터, 어떻게 하면 되나)에 답하고,
+  숫자·날짜·기관명을 구체적으로 쓰고, 같은 말 반복·뻔한 일반론·AI 티 나는 상투어("~에 대해 알아보겠습니다",
+  "결론적으로", "다양한") 를 피하고, 문단마다 새로운 정보가 있어야 합니다.
 - 출처 표기는 프로그램이 따로 붙이니 본문에 URL이나 '출처:'를 쓰지 마세요.
 - tags 는 5~10개, # 없이."""
+
+
+REVISE_SYSTEM = """당신은 깐깐한 블로그 편집장입니다. 초안을 검토해 더 좋은 최종본을 같은 JSON 형식으로 돌려줍니다.
+점검 후 고칠 것:
+1. 사실 정확성: 각 사실 문단이 fact_ids 의 사실과 정확히 일치하는가. 사실 목록에 없는 숫자·주장은 삭제.
+2. 추론 표시: 사실을 넘어서는 해석·전망은 is_inference=true 와 구체적인 inference_reasoning 이 있는가.
+   본문 표현도 단정하지 않는가.
+3. 품질: 도입이 독자의 궁금증을 바로 건드리는가, 소제목만 읽어도 흐름이 보이는가, 중복·상투어·빈말이 없는가,
+   문단마다 새로운 정보가 있는가, 2,200~3,500자 분량인가.
+4. 제목: 핵심 키워드가 앞쪽, 40자 이내, 과장 없음.
+규칙은 초안 작성 규칙과 같습니다. 출처·URL 은 본문에 쓰지 마세요."""
 
 
 class Writer:
     def extract_facts(self, topic: str, sources: list) -> dict: raise NotImplementedError
     def write_post(self, topic: str, facts: list[dict]) -> dict: raise NotImplementedError
+    def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict: raise NotImplementedError
 
 
 class ClaudeWriter(Writer):
@@ -154,13 +169,23 @@ class ClaudeWriter(Writer):
         user = f"주제: {topic}\n오늘 날짜: {date.today()}\n\n<sources>\n{docs}\n</sources>\n\n위 자료에서 사실을 뽑아 주세요."
         return self._json(FACTS_SYSTEM, user, FACTS_SCHEMA)
 
-    def write_post(self, topic: str, facts: list[dict]) -> dict:
-        lines = "\n".join(
+    @staticmethod
+    def _fact_lines(facts: list[dict]) -> str:
+        return "\n".join(
             f"{f['id']}: {f['statement']}  (확인 매체 {f['outlet_count']}곳"
             f"{', 단일 출처' if f['outlet_count'] < 2 else ''})" for f in facts
         )
-        user = f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{lines}\n\n이 사실만으로 글을 써 주세요."
+
+    def write_post(self, topic: str, facts: list[dict]) -> dict:
+        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+                "\n\n이 사실만으로 글을 써 주세요.")
         return self._json(WRITE_SYSTEM, user, POST_SCHEMA)
+
+    def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict:
+        user = (f"주제: {topic}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+                f"\n\n<draft>\n{json.dumps(draft, ensure_ascii=False)}\n</draft>\n\n"
+                "초안을 점검하고 고친 최종본을 주세요.")
+        return self._json(WRITE_SYSTEM + "\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)
 
 
 def make_writer(cfg) -> Writer:

@@ -103,9 +103,9 @@ def test_config_roundtrip_and_unlimited_keywords():
     c = Config()
     long_kw = "가" * 500
     c.update({"keywords": "\n".join([long_kw] + [f"키워드{i}" for i in range(300)]),
-              "daily_limit": "7", "use_kiss": "false", "unknown": 1})
+              "daily_limit": "2", "use_kiss": "false", "unknown": 1})
     c.save()
     c2 = Config.load()
     assert c2.keywords[0] == long_kw and len(c2.keywords) == 301
-    assert c2.daily_limit == 7 and c2.use_kiss is False
-    assert json.loads(Config.path().read_text(encoding="utf-8"))["daily_limit"] == 7
+    assert c2.daily_limit == 2 and c2.use_kiss is False
+    assert json.loads(Config.path().read_text(encoding="utf-8"))["daily_limit"] == 2

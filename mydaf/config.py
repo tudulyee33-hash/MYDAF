@@ -21,16 +21,21 @@ def app_dir() -> Path:
     return base
 
 
+# 네이버 저품질·이용 제한 위험을 줄이기 위한 고정 안전장치 (설정 화면·원격으로도 넘을 수 없음)
+HARD_DAILY_MAX = 3            # 하루 최대 글 수
+MIN_INTERVAL_FLOOR = 180      # 글 사이 최소 간격(분) = 3시간
+
+
 @dataclass
 class Config:
     # AI
     ai_provider: str = "claude"          # 지금은 claude. ai.py 에 다른 공급자를 추가할 수 있다.
     anthropic_api_key: str = ""
     model: str = "claude-opus-5-5"
-    effort: str = "high"
+    effort: str = "xhigh"           # 고품질: 깊게 생각하고 쓰기
 
     # 네이버 블로그
-    naver_blog_id: str = ""
+    naver_blog_id: str = "tudulyee33"
     publish_mode: str = "draft"          # draft(임시저장) | publish(발행)
     category: str = ""                   # 비워두면 기본 카테고리
     browser_channel: str = "msedge"      # msedge | chrome
@@ -53,22 +58,36 @@ class Config:
     # 검증
     min_independent_sources: int = 2     # 사실 1개당 서로 다른 출처(도메인) 최소 수
     allow_single_source: bool = False    # True면 1곳 확인 사실도 "단일 출처"로 쓸 수 있음
-    min_verified_facts: int = 4          # 이보다 적으면 그 주제는 발행하지 않음
+    min_verified_facts: int = 6          # 이보다 적으면 그 주제는 발행하지 않음
 
     # 출처 표기
     citation_align: str = "right"        # right | left
     citation_font_size: int = 11
 
     # 연속 실행
-    daily_limit: int = 5
-    interval_min_minutes: int = 40
-    interval_max_minutes: int = 90
+    daily_limit: int = 3                 # 최대 HARD_DAILY_MAX(3)
+    interval_min_minutes: int = 200      # 최소 MIN_INTERVAL_FLOOR(180)
+    interval_max_minutes: int = 300
+    active_start_hour: int = 8           # 이 시간대 안에서만 글을 올림
+    active_end_hour: int = 22
+    min_post_chars: int = 1800           # 본문이 이보다 짧으면 올리지 않음
 
     # 원격 제어 (선택, 기본 꺼짐)
     remote_enabled: bool = False
     remote_url: str = ""                 # 예: https://내서버.com
     remote_token: str = ""
     remote_poll_seconds: int = 30
+
+    def __post_init__(self):
+        self.clamp()
+
+    def clamp(self) -> None:
+        """안전장치: 한도·간격은 고정 기준을 넘지 못하게 맞춘다."""
+        self.daily_limit = max(1, min(int(self.daily_limit), HARD_DAILY_MAX))
+        self.interval_min_minutes = max(int(self.interval_min_minutes), MIN_INTERVAL_FLOOR)
+        self.interval_max_minutes = max(int(self.interval_max_minutes), self.interval_min_minutes)
+        self.active_start_hour = max(0, min(int(self.active_start_hour), 23))
+        self.active_end_hour = max(self.active_start_hour + 1, min(int(self.active_end_hour), 24))
 
     @classmethod
     def path(cls) -> Path:
@@ -106,4 +125,5 @@ class Config:
                 value = str(value)
             setattr(self, key, value)
             changed.append(key)
+        self.clamp()
         return changed

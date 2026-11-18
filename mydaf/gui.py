@@ -24,9 +24,11 @@ TABS = {
         ("publish_mode", "발행 방식 (draft=임시저장, publish=바로 발행)", "choice:draft,publish"),
         ("category", "카테고리 이름 (비우면 기본)", "str"),
         ("browser_channel", "사용할 브라우저", "choice:msedge,chrome"),
-        ("daily_limit", "하루 최대 글 수", "int"),
-        ("interval_min_minutes", "글 사이 최소 간격(분)", "int"),
+        ("daily_limit", "하루 최대 글 수 (최대 3, 넘길 수 없음)", "choice:1,2,3"),
+        ("interval_min_minutes", "글 사이 최소 간격(분, 180 이상)", "int"),
         ("interval_max_minutes", "글 사이 최대 간격(분)", "int"),
+        ("active_start_hour", "글 올리는 시작 시각(시)", "int"),
+        ("active_end_hour", "글 올리는 종료 시각(시)", "int"),
     ],
     "키워드": [
         ("keywords", "키워드 (한 줄에 하나, 개수·길이 제한 없음)", "lines"),
@@ -47,6 +49,7 @@ TABS = {
         ("min_independent_sources", "사실 1개당 필요한 서로 다른 매체 수", "int"),
         ("allow_single_source", "1곳만 확인된 사실도 사용", "bool"),
         ("min_verified_facts", "글을 쓰기 위한 최소 검증 사실 수", "int"),
+        ("min_post_chars", "최소 본문 글자 수 (미달 시 올리지 않음)", "int"),
         ("citation_align", "출처 위치", "choice:right,left"),
         ("citation_font_size", "출처 글자 크기", "choice:11,13"),
     ],
@@ -137,6 +140,9 @@ class App:
         self.remote.stop()
         self.remote = RemoteControl(self.cfg, self.runner, self.msgs.put)
         self.remote.start()
+        for key in ("daily_limit", "interval_min_minutes", "interval_max_minutes",
+                    "active_start_hour", "active_end_hour"):
+            self.vars[key].set(str(getattr(self.cfg, key)))   # 안전장치로 조정된 값을 화면에 반영
         if not quiet:
             self.msgs.put("설정을 저장했습니다.")
         return True

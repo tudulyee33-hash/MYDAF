@@ -90,3 +90,10 @@ def cited_sources(post: dict, usable_facts: list[dict], sources: list) -> list:
                     if ev["source_id"] not in order:
                         order.append(ev["source_id"])
     return [by_id[i] for i in order if i in by_id]
+
+
+def body_chars(post: dict) -> int:
+    """공백 제외 본문 글자 수 (품질 기준 확인용)."""
+    parts = [post.get("intro", ""), post.get("conclusion", "")]
+    parts += [p["text"] for s in post.get("sections", []) for p in s["paragraphs"]]
+    return sum(len("".join(x.split())) for x in parts)

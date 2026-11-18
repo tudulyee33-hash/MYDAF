@@ -22,7 +22,7 @@ class FakeWriter:
         return {"facts": [
             {"statement": f"사실{i}", "evidence": [{"source_id": "S1", "quote": f"공통 문장 {i}번 내용입니다"},
                                                   {"source_id": "S2", "quote": f"공통 문장 {i}번 내용입니다"}]}
-            for i in range(5)], "conflicts": []}
+            for i in range(7)], "conflicts": []}
 
     def write_post(self, topic, facts):
         return {"title": f"{topic} 정리", "intro": "도입", "conclusion": "마무리", "tags": ["a", "b"],
@@ -30,6 +30,11 @@ class FakeWriter:
                     {"text": "사실 문단", "fact_ids": ["F1", "F2"], "is_inference": False, "inference_reasoning": ""},
                     {"text": "추론 문단", "fact_ids": ["F3"], "is_inference": True,
                      "inference_reasoning": "F3의 증가 추세로 보아 내년에도 이어질 것으로 추정"}]}]}
+
+
+    def revise_post(self, topic, facts, draft):
+        draft["sections"][0]["paragraphs"][0]["text"] = "검토 후 사실 문단 " * 300
+        return draft
 
 
 class FakeBlog:
@@ -46,9 +51,22 @@ class FakeBlog:
 
 
 def fake_collect(topic, cfg, progress):
-    text = " ".join(f"공통 문장 {i}번 내용입니다." for i in range(5))
+    text = " ".join(f"공통 문장 {i}번 내용입니다." for i in range(7))
     return [Source("news", "기사1", "https://a.com/1", "A", "2026-11-01", text=text, id="S1"),
             Source("news", "기사2", "https://b.com/2", "B", "2026-11-02", text=text, id="S2")]
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def fresh_history(monkeypatch, tmp_path):
+    hist = tmp_path / "history.jsonl"
+    monkeypatch.setattr(logs, "history_path", lambda: hist)
+    return hist
+
+
+ALWAYS = dict(active_start_hour=0, active_end_hour=24)
 
 
 def test_full_pipeline_logs_reasoning(monkeypatch):
@@ -56,7 +74,7 @@ def test_full_pipeline_logs_reasoning(monkeypatch):
     monkeypatch.setattr(runner_mod.ai, "make_writer", lambda cfg: FakeWriter())
     monkeypatch.setattr(runner_mod.sources, "collect", fake_collect)
     monkeypatch.setattr(mydaf.naver, "NaverBlog", FakeBlog)
-    cfg = Config(anthropic_api_key="x", naver_blog_id="me", keywords=["전기차"], use_google_trends=False)
+    cfg = Config(anthropic_api_key="x", naver_blog_id="me", keywords=["전기차"], use_google_trends=False, **ALWAYS)
     r = runner_mod.Runner(cfg, say=lambda m: None)
     res = r.run_once()
     assert res["status"] == "draft" and res["inferences"] == 1 and res["sources"] == 2
@@ -70,13 +88,54 @@ def test_full_pipeline_logs_reasoning(monkeypatch):
         p.name for p in folder.iterdir()}
     # 방금 쓴 주제는 쿨다운 → 다음 회차 후보에서 빠짐
     assert runner_mod.topics.next_topics(cfg) == []
+    # 3시간 간격 안전장치: 바로 다음 글은 막힘 (원고 작성 전에 막혀서 AI 비용도 안 씀)
+    blocked = r.run_once("다른 주제")
+    assert blocked["status"] == "blocked" and "간격" in blocked["reason"]
+
+
+def _hist(path, times, status="published"):
+    path.write_text("".join(json.dumps({"time": t.isoformat(), "topic": f"t{i}", "status": status},
+                                       ensure_ascii=False) + "\n" for i, t in enumerate(times)), encoding="utf-8")
+
+
+def test_daily_cap_is_hard_3(fresh_history):
+    from datetime import datetime, timedelta
+    cfg = Config(daily_limit=10, interval_min_minutes=5, **ALWAYS)
+    assert cfg.daily_limit == 3 and cfg.interval_min_minutes == 180
+    cfg.update({"daily_limit": 50, "interval_min_minutes": 1})
+    assert cfg.daily_limit == 3 and cfg.interval_min_minutes == 180
+    now = datetime.now().replace(hour=23, minute=0)
+    r = runner_mod.Runner(cfg, say=lambda m: None)
+    _hist(fresh_history, [now - timedelta(hours=h) for h in (12, 8, 4)])
+    ok, reason, wait = r.gate(now)
+    assert not ok and "한도 3" in reason and wait > 0
+    # 실패한 네이버 시도도 한도에 포함
+    _hist(fresh_history, [now - timedelta(hours=h) for h in (12, 8, 4)], status="naver_error")
+    assert not r.gate(now)[0]
+    # 2개만 썼고 4시간 지났으면 가능
+    _hist(fresh_history, [now - timedelta(hours=h) for h in (12, 4)])
+    assert r.gate(now)[0]
+
+
+def test_interval_and_active_hours(fresh_history):
+    from datetime import datetime, timedelta
+    cfg = Config(active_start_hour=8, active_end_hour=22)
+    r = runner_mod.Runner(cfg, say=lambda m: None)
+    noon = datetime.now().replace(hour=12, minute=0)
+    _hist(fresh_history, [noon - timedelta(minutes=100)])
+    ok, reason, _ = r.gate(noon)
+    assert not ok and "간격" in reason
+    _hist(fresh_history, [])
+    assert r.gate(noon)[0]
+    ok, reason, wait = r.gate(noon.replace(hour=23))
+    assert not ok and "활동 시간" in reason and 0 < wait <= 9 * 3600
 
 
 def test_skips_when_sources_not_independent(monkeypatch):
     monkeypatch.setattr(runner_mod.ai, "make_writer", lambda cfg: FakeWriter())
     monkeypatch.setattr(runner_mod.sources, "collect",
                         lambda t, c, p: [Source("news", "x", "https://a.com/1", text="t", id="S1")])
-    cfg = Config(anthropic_api_key="x", naver_blog_id="me", use_google_trends=False)
+    cfg = Config(anthropic_api_key="x", naver_blog_id="me", use_google_trends=False, **ALWAYS)
     res = runner_mod.Runner(cfg, say=lambda m: None).run_once("단일출처주제")
     assert res["status"] == "skipped" and "독립 출처" in res["reason"]
 
