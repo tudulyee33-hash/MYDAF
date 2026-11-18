@@ -93,7 +93,7 @@ def cited_sources(post: dict, usable_facts: list[dict], sources: list) -> list:
 
 
 def body_chars(post: dict) -> int:
-    """공백 제외 본문 글자 수 (품질 기준 확인용)."""
+    """본문 글자 수, 공백 포함 (네이버·일반 글자 수 세기와 같은 방식). 품질 기준 확인용."""
     parts = [post.get("intro", ""), post.get("conclusion", "")]
     parts += [p["text"] for s in post.get("sections", []) for p in s["paragraphs"]]
-    return sum(len("".join(x.split())) for x in parts)
+    return sum(len(" ".join(x.split())) for x in parts)

@@ -130,7 +130,7 @@ REVISE_SYSTEM = """당신은 깐깐한 블로그 편집장입니다. 초안을 �
 2. 추론 표시: 사실을 넘어서는 해석·전망은 is_inference=true 와 구체적인 inference_reasoning 이 있는가.
    본문 표현도 단정하지 않는가.
 3. 품질: 도입이 독자의 궁금증을 바로 건드리는가, 소제목만 읽어도 흐름이 보이는가, 중복·상투어·빈말이 없는가,
-   문단마다 새로운 정보가 있는가, 2,200~3,500자 분량인가.
+   문단마다 새로운 정보가 있는가, 본문이 공백 포함 2,200~3,500자 분량인가(모자라면 사실의 배경·의미·비교 설명을 보태세요. 새 사실은 금지).
 4. 제목: 핵심 키워드가 앞쪽, 40자 이내, 과장 없음.
 규칙은 초안 작성 규칙과 같습니다. 출처·URL 은 본문에 쓰지 마세요."""
 
@@ -185,6 +185,15 @@ class Writer:
         user = (f"주제: {topic}{_bundle_note(topic)}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
                 "\n\n이 사실만으로 글을 써 주세요.")
         return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}", user, POST_SCHEMA)
+
+    def expand_post(self, topic: str, facts: list[dict], post: dict, now_chars: int, target: int) -> dict:
+        """분량이 모자랄 때 한 번 더: 검증된 사실의 배경·의미·비교로 늘린다 (새 사실 금지)."""
+        user = (f"주제: {topic}{_bundle_note(topic)}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
+                f"\n\n<draft>\n{json.dumps(post, ensure_ascii=False)}\n</draft>\n\n"
+                f"이 글의 본문은 지금 공백 포함 {now_chars}자입니다. 공백 포함 {target}자 이상이 되도록 늘려 주세요. "
+                "모든 사실을 빠짐없이 활용하고, 각 사실의 배경·의미·독자에게 주는 시사점·사실끼리의 비교를 문단으로 보태세요. "
+                "목록에 없는 새 사실·숫자는 절대 넣지 말고, 해석·전망 문단은 is_inference=true 와 근거를 적으세요.")
+        return self._json(WRITE_SYSTEM + f"\n\n말투: {self.style}\n\n" + REVISE_SYSTEM, user, POST_SCHEMA)
 
     def revise_post(self, topic: str, facts: list[dict], draft: dict) -> dict:
         user = (f"주제: {topic}{_bundle_note(topic)}\n오늘 날짜: {date.today()}\n\n검증된 사실 목록:\n{self._fact_lines(facts)}"
@@ -258,7 +267,7 @@ class GeminiWriter(Writer):
     URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     MIN_GAP_SECONDS = 5               # 무료 한도(분당 요청 수) 여유 있게
     TIMEOUT = (10, 150)               # 연결 10초, 응답 150초. 넘으면 다른 모델로
-    max_source_chars = 4000           # 무료 한도(분당 토큰 수)에 맞춰 자료를 줄여서 보냄
+    max_source_chars = 8000           # 자료 1건당 보내는 글자 수 (무료 한도 안에서 넉넉히)
     _last_call = 0.0
 
     def __init__(self, api_key: str, model: str = "gemini-flash-latest", style: str = "정보 전달형 전문가"):

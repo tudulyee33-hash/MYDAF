@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 # ------------------------------------------------------------------ 디자인
 C = {

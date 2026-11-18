@@ -76,14 +76,14 @@ def test_gemini_writer_retries_on_rate_limit(monkeypatch):
         return responses.pop(0)
     monkeypatch.setattr(ai.requests, "post", post)
     w = ai.GeminiWriter("gm-key", "gemini-2.5-flash")
-    out = w.extract_facts("주제", [Source("news", "t", "https://a.com", text="가" * 9000, id="S1")])
+    out = w.extract_facts("주제", [Source("news", "t", "https://a.com", text="가" * 9500, id="S1")])
     assert out == {"facts": [], "conflicts": []}
     assert len(calls) == 2 and 9 in sleeps                       # retryDelay 7초 + 여유 2초
     url, body, headers = calls[0]
     assert "models/gemini-2.5-flash:generateContent" in url and headers["x-goog-api-key"] == "gm-key"
     assert "gm-key" not in url                                     # 키는 주소에 넣지 않음
     assert body["generationConfig"]["responseMimeType"] == "application/json"
-    assert body["contents"][0]["parts"][0]["text"].count("가") == 4000   # 무료 한도용 자료 축소
+    assert body["contents"][0]["parts"][0]["text"].count("가") == 8000   # 자료 1건당 8000자로 축소
 
 
 def test_make_writer_picks_provider():

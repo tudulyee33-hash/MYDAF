@@ -231,3 +231,23 @@ def test_batch_runs_with_finish_mode(monkeypatch):
     r.stop()
     r.thread.join(timeout=5)
     assert not r.running and r.finish_mode is None
+
+
+def test_short_post_gets_expanded(monkeypatch):
+    import mydaf.naver
+
+    class Short(FakeWriter):
+        expanded = 0
+        def revise_post(self, topic, facts, draft):
+            draft["sections"][0]["paragraphs"][0]["text"] = "짧은 사실 문단"
+            return draft
+        def expand_post(self, topic, facts, post, now, target):
+            Short.expanded += 1
+            post["sections"][0]["paragraphs"][0]["text"] = "늘린 사실 문단 " * 300
+            return post
+    monkeypatch.setattr(runner_mod.ai, "make_writer", lambda cfg: Short())
+    monkeypatch.setattr(runner_mod.sources, "collect", fake_collect)
+    monkeypatch.setattr(mydaf.naver, "NaverBlog", FakeBlog)
+    cfg = Config(gemini_api_key="x", keywords=["전기차"], use_google_trends=False, **ALWAYS)
+    res = runner_mod.Runner(cfg, say=lambda m: None).run_once()
+    assert Short.expanded == 1 and res["status"] == "draft"

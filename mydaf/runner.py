@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import copy
 import random
 import threading
 from datetime import date, datetime, timedelta
@@ -314,6 +315,19 @@ class Runner:
             self.step(2, 0.5, "편집장 검토·수정 중")
             self.say(f"[{topic}] 자체 검토·수정")
             post = writer.revise_post(topic, checked["usable"], draft)
+            probe = copy.deepcopy(post)
+            verify.check_draft(probe, checked["usable"])      # 근거 없는 문단을 뺀 뒤의 분량
+            short = verify.body_chars(probe)
+            if short < cfg.min_post_chars and hasattr(writer, "expand_post"):
+                self.step(2, 0.8, f"분량이 {short}자라 {cfg.min_post_chars}자 이상으로 보강 중")
+                self.say(f"[{topic}] 분량 보강 ({short}자 → {cfg.min_post_chars}자+)")
+                try:
+                    post = writer.expand_post(topic, checked["usable"], post, short, cfg.min_post_chars + 300)
+                    save_json(folder, "3b_expanded.json", post)
+                except (ai.AIAccountError, ai.AIBusyError):
+                    raise
+                except Exception as e:
+                    log.warning("분량 보강 실패: %s", e)
             review = verify.check_draft(post, checked["usable"])
             cited = verify.cited_sources(post, checked["usable"], srcs)
             record_reasoning(post_id, topic, review["inferences"])       # 추론·추리 기록 (필수)
@@ -423,8 +437,11 @@ class Runner:
     def _skip(self, record: dict, reason: str, status: str = "skipped") -> dict:
         record.update(status=status, reason=reason)
         if self.job and "step_times" not in record:
-            record.update(step_times=list(self.job.get("step_times") or []),
-                          elapsed=int(time.time() - self.job["started"]))
+            times = list(self.job.get("step_times") or [0] * len(STEPS))
+            idx = self.job.get("step", 0)
+            if not times[idx] and "step_started" in self.job:
+                times[idx] = int(time.time() - self.job["step_started"])
+            record.update(step_times=times, elapsed=int(time.time() - self.job["started"]))
         add_history(record)
         self.say(f"[{record['topic']}] 건너뜀: {reason}")
         return record
