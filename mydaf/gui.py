@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -250,6 +250,7 @@ class App:
 
         self.remote.start()
         self.root.after(400, self._startup_install)
+        self.root.after(1200, self._startup_login_check)
         if self.cfg.auto_start and self.cfg.setup_done:
             self.root.after(1500, self.on_toggle)
         self.root.after(300, self._pump)
@@ -273,6 +274,26 @@ class App:
             return tk.Label(parent, image=self._logo_img, bg=bg)
         except tk.TclError:
             return tk.Label(parent, text="M", bg=C["primary"], fg="white", font=F(14, "bold"), width=3)
+
+    def _startup_login_check(self):
+        """켤 때 저장된 네이버 로그인이 살아 있는지 화면 없이 확인 (상단 '로그인 확인 전'이 계속 남지 않게)."""
+        from .naver import PROFILE
+        if not PROFILE.exists():
+            self.login_state = "필요"
+            return
+
+        def job():
+            if self.runner.running:
+                return
+            try:
+                from .naver import NaverBlog
+                with NaverBlog(self.cfg.naver_blog_id, self.cfg.browser_channel, headless=True) as nb:
+                    ok = nb.is_logged_in()
+                self.login_state = "됨" if ok else "필요"
+            except Exception as e:
+                log_msg = f"네이버 로그인 자동 확인 실패: {e.__class__.__name__}"
+                self.msgs.put(log_msg)
+        threading.Thread(target=job, daemon=True).start()
 
     def _startup_install(self):
         info = install.startup_check(app_dir())

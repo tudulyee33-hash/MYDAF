@@ -171,3 +171,37 @@ def test_gemini_credit_exhausted_is_account_error(monkeypatch):
     monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
     with pytest.raises(ai.AIAccountError, match="크레딧"):
         ai.GeminiWriter("k")._json("s", "u", {"type": "object", "properties": {}})
+
+
+def test_gemini_busy_switches_fast_and_saves_only_on_success(monkeypatch):
+    import mydaf.ai as ai
+    import requests as rq
+    calls, saved = [], []
+
+    class R:
+        def __init__(self, code, body=None):
+            self.status_code, self._b, self.text = code, body or {}, "x"
+        def json(self):
+            return self._b
+        def raise_for_status(self):
+            pass
+
+    def post(url, **kw):
+        m = url.split("/models/")[1].split(":")[0]
+        calls.append(m)
+        if m == "gemini-3.8-flash":
+            raise rq.exceptions.ReadTimeout("slow")
+        if m == "gemini-3.5-flash":
+            return R(503)
+        return R(200, {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}, "finishReason": "STOP"}]})
+
+    listing = {"models": [{"name": f"models/{n}", "supportedGenerationMethods": ["generateContent"]}
+                          for n in ("gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-lite-latest")]}
+    monkeypatch.setattr(ai.requests, "post", post)
+    monkeypatch.setattr(ai.requests, "get", lambda url, **kw: R(200, listing))
+    monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
+    w = ai.GeminiWriter("k", "gemini-3.8-flash")
+    w.on_model_change = saved.append
+    assert w._json("s", "u", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
+    assert calls == ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-lite-latest"]
+    assert saved == ["gemini-flash-lite-latest"]

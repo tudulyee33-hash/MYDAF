@@ -141,6 +141,10 @@ def _bundle_note(topic: str) -> str:
             "쓰세요. 사실이 없는 검색어는 억지로 넣지 마세요. 제목은 묶음 전체가 아니라 실제로 다룬 내용을 보여 주세요.)")
 
 
+class AIBusyError(RuntimeError):
+    """AI 서버 혼잡으로 이번엔 못 씀. 다른 주제로 넘어가지 않고 잠시 뒤 다시 시도한다."""
+
+
 class AIAccountError(RuntimeError):
     """키·결제 문제라 다시 시도해도 안 되는 오류. 자동 등록을 멈추고 사용자에게 알린다."""
 
@@ -251,7 +255,8 @@ def to_gemini_schema(schema: dict) -> dict:
 class GeminiWriter(Writer):
     """Google Gemini (AI Studio 무료 키 사용 가능). 무료 한도에 맞춰 호출 간격을 두고, 한도 초과(429) 시 기다렸다 재시도."""
     URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    MIN_GAP_SECONDS = 15              # 무료 한도(분당 요청 수) 여유 있게
+    MIN_GAP_SECONDS = 5               # 무료 한도(분당 요청 수) 여유 있게
+    TIMEOUT = (10, 150)               # 연결 10초, 응답 150초. 넘으면 다른 모델로
     max_source_chars = 4000           # 무료 한도(분당 토큰 수)에 맞춰 자료를 줄여서 보냄
     _last_call = 0.0
 
@@ -276,18 +281,34 @@ class GeminiWriter(Writer):
         return [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
 
-    def _next_model(self, suggested: str = "") -> bool:
-        """설정한 모델이 이 키에 없을 때(404) 실제로 쓸 수 있는 모델을 골라 바꾼다."""
+    FAST_MODELS = ("gemini-3.5-flash", "gemini-flash-latest", "gemini-2.5-flash", "gemini-flash-lite-latest",
+                   "gemini-3.5-flash-lite", "gemini-2.5-flash-lite")
+
+    def _models(self) -> list[str]:
+        if getattr(self, "_avail", None) is None:
+            self._avail = self.available_models()
+        return self._avail
+
+    def _next_model(self, suggested: str = "", busy: bool = False) -> bool:
+        """다른 모델로 바꾼다. 404(없는 모델)이면 가장 가까운 것, 혼잡(503·응답 없음)이면 빠르고 한가한 쪽으로."""
         tried = getattr(self, "_tried", set())
         tried.add(self.model)
         self._tried = tried
-        cand = pick_gemini_model(self.available_models(), self.model, exclude=tried, suggested=suggested)
+        avail = self._models()
+        cand = None
+        if suggested and suggested in avail and suggested not in tried:
+            cand = suggested
+        if cand is None and busy:
+            cand = next((m for m in self.FAST_MODELS if m in avail and m not in tried), None)
+        if cand is None:
+            cand = pick_gemini_model(avail, self.model, exclude=tried, suggested=suggested)
+        if cand is None and busy:
+            cand = next((m for m in self.FAST_MODELS if m not in tried), None)   # 목록을 못 받았을 때
         if not cand:
             return False
-        log.warning("Gemini 모델 '%s' 를 이 키로 쓸 수 없음 → '%s' 로 바꿔 시도", self.model, cand)
+        log.warning("Gemini '%s' %s → '%s' 로 바꿔요", self.model,
+                    "서버 혼잡(응답 없음·503)" if busy else "이 키로 쓸 수 없음(404)", cand)
         self.model = cand
-        if self.on_model_change:
-            self.on_model_change(cand)
         return True
 
     def _wait_gap(self):
@@ -304,34 +325,39 @@ class GeminiWriter(Writer):
                                  "responseSchema": to_gemini_schema(schema),
                                  "maxOutputTokens": 32000},
         }
-        busy = 0
-        for attempt in range(6):
+        start_model = self.model
+        limited = 0
+        for attempt in range(8):
             self._wait_gap()
+            t0 = time.time()
             try:
-                r = requests.post(self.URL.format(model=self.model), json=body, timeout=300,
+                r = requests.post(self.URL.format(model=self.model), json=body, timeout=self.TIMEOUT,
                                   headers={"x-goog-api-key": self.api_key})
             except requests.RequestException as e:
-                log.warning("Gemini 연결 실패 (%s회): %s", attempt + 1, e)
-                time.sleep(20 * (attempt + 1))
+                log.warning("Gemini '%s' 응답 없음 (%.0f초): %s", self.model, time.time() - t0, e.__class__.__name__)
+                if not self._next_model(busy=True):
+                    time.sleep(5)
                 continue
             low = (r.text or "").lower()
             if r.status_code == 402 or (r.status_code == 429 and ("prepay" in low or "credit" in low or "billing" in low)):
                 raise AIAccountError(GEMINI_ACCOUNT_HINT["credit"])
             if r.status_code in (401, 403) or (r.status_code == 400 and "api key" in low):
                 raise AIAccountError(GEMINI_ACCOUNT_HINT["key"])
-            if r.status_code == 503:
-                busy += 1
-                if busy >= 2 and self._next_model():     # 모델이 붐비면 기다리지 말고 다른 모델로
-                    log.warning("Gemini 모델이 붐벼서 '%s' 로 바꿔요", self.model)
-                    busy = 0
+            if r.status_code in (500, 502, 503, 504):
+                log.warning("Gemini '%s' 서버 혼잡 %s", self.model, r.status_code)
+                if not self._next_model(busy=True):
+                    time.sleep(10)
+                continue
+            if r.status_code == 429:
+                limited += 1
+                wait = min(_retry_delay(r) or 20, 60)
+                if limited >= 2 and self._next_model(busy=True):   # 모델마다 한도가 따로라 다른 모델로
                     continue
-            if r.status_code == 429 or r.status_code >= 500:
-                wait = _retry_delay(r) or 30 * (attempt + 1)
-                log.warning("Gemini 한도/일시 오류 %s, %s초 후 재시도", r.status_code, wait)
-                time.sleep(min(wait, 120))
+                log.warning("Gemini 분당 한도, %s초 후 다시", wait)
+                time.sleep(wait)
                 continue
             if r.status_code == 404:
-                hint = re.search(r"models/(gemini[\w.\-]+)", (r.text or "").split("use", 1)[-1]) if "use" in (r.text or "") else None
+                hint = re.search(r"models/(gemini[\w.\-]+)", low.split("use", 1)[-1]) if "use" in low else None
                 if self._next_model(hint.group(1) if hint else ""):
                     continue
             if r.status_code in (400, 401, 403, 404):
@@ -352,8 +378,11 @@ class GeminiWriter(Writer):
             if reason == "MAX_TOKENS":
                 raise RuntimeError("AI 응답이 길이 제한에 걸려 잘렸습니다.")
             text = "".join(p.get("text", "") for p in cand.get("content", {}).get("parts", []) if not p.get("thought"))
+            log.info("Gemini '%s' 응답 %.0f초", self.model, time.time() - t0)
+            if self.model != start_model and self.on_model_change:
+                self.on_model_change(self.model)        # 실제로 된 모델만 설정에 저장
             return json.loads(text)
-        raise RuntimeError("Gemini 무료 사용 한도에 걸려 여러 번 실패했습니다. 잠시 후 다시 시도하세요.")
+        raise AIBusyError("Gemini 서버가 혼잡해서 여러 모델로 시도해도 응답을 받지 못했어요. 잠시 뒤 다시 시도해요.")
 
 
 def _version(name: str) -> tuple:

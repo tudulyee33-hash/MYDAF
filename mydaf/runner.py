@@ -225,11 +225,12 @@ class Runner:
                     continue
                 result = self.run_once()
                 if result.get("status") not in COUNTED and not self._stop.is_set():  # ai_error 는 위에서 stop
-                    retry = datetime.now() + timedelta(minutes=30)
+                    mins = 10 if result.get("status") == "ai_busy" else 30
+                    retry = datetime.now() + timedelta(minutes=mins)
                     self.state = "waiting"
                     self.say(f"이번엔 기준을 넘은 주제가 없어 {retry:%H:%M}에 다시 시도해요 (사유: "
                              f"{result.get('reason') or result.get('status')})")
-                    self._stop.wait(1800)     # 쓸 만한 주제가 없으면 30분 뒤 다시
+                    self._stop.wait(mins * 60)     # 쓸 만한 주제가 없으면 30분(AI 혼잡이면 10분) 뒤 다시
                     self.state = "running"
         finally:
             self.state = "idle"
@@ -257,7 +258,7 @@ class Runner:
                 break
             result = self._one(t, writer)
             self.last_result = result
-            if result["status"] in COUNTED or result["status"] in ("blocked", "ai_error"):
+            if result["status"] in COUNTED or result["status"] in ("blocked", "ai_error", "ai_busy"):
                 return result
         return self.last_result
 
@@ -351,6 +352,10 @@ class Runner:
             self.say(f"⚠ {e}")
             self.say("AI 키 문제가 해결될 때까지 자동 등록을 멈췄어요. 고친 뒤 다시 시작을 눌러 주세요.")
             return self._skip(record, str(e), status="ai_error")
+        except ai.AIBusyError as e:
+            log.warning("AI 혼잡: %s", e)
+            self.say(f"⚠ {e}")
+            return self._skip(record, str(e), status="ai_busy")
         except Exception as e:
             log.exception("작업 실패")
             return self._skip(record, f"{e.__class__.__name__}: {e}", status="error")

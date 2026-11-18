@@ -202,8 +202,14 @@ def parse_google_news_rss(xml: str, limit: int) -> list[Source]:
     return out
 
 
+_GN_DECODE_OK = True     # 한 번 실패하면 이번 실행에서는 다시 시도하지 않음 (시간 절약)
+
+
 def decode_google_news_url(url: str) -> str:
     """news.google.com/rss/articles/... 링크를 원래 기사 주소로 바꾼다. 실패하면 ''."""
+    global _GN_DECODE_OK
+    if not _GN_DECODE_OK:
+        return ""
     m = re.search(r"/(?:rss/)?articles/([^/?#]+)", url)
     if "news.google.com" not in url or not m:
         return ""
@@ -234,6 +240,7 @@ def decode_google_news_url(url: str) -> str:
         return found if isinstance(found, str) and found.startswith("http") else ""
     except (requests.RequestException, ValueError, IndexError, TypeError, KeyError) as e:
         log.info("구글 뉴스 주소 풀기 실패: %s", e)
+        _GN_DECODE_OK = False
         return ""
 
 
@@ -407,8 +414,10 @@ def _finish(found: list[Source], progress) -> list[Source]:
             if len(body) > len(s.text):
                 s.text = body
     thin = [s for s in unique if s.kind == "news" and len(s.text) < 200]
-    if thin:
-        progress(f"  · 본문을 못 가져온 기사 {len(thin)}건 (제목만 있음)")
+    if thin and len(unique) - len(thin) >= 4:
+        # 제목뿐인 기사는 사실 확인에 쓸 수 없고 AI 시간만 늘려서 뺀다
+        unique = [s for s in unique if s not in thin]
+        progress(f"  · 제목만 있는 기사 {len(thin)}건은 뺐어요")
     for i, s in enumerate(unique, 1):
         s.id = f"S{i}"
         if not s.published:
