@@ -86,6 +86,10 @@ class Runner:
         self.job: dict | None = None      # 화면에 보여줄 현재 작업 진행 상황
         self.ai_problem = ""              # AI 키·결제 문제 (화면 알림용)
         self.finish_mode: str | None = None   # 이번 작업만 '다 쓰면' 바꾸기 (draft | publish)
+        self._wake = threading.Event()        # 대기 중에 '수동으로 쓰기'가 들어오면 깨운다
+        self._manual: tuple | None = None
+        self._last_wait = ""
+        self._manual_now = False              # 지금 쓰는 글이 사용자가 직접 누른 첫 편인가
 
     def step(self, idx: int, frac: float = 0.0, msg: str = ""):
         """진행 단계 갱신 (화면의 단계 표시·진행률 막대용)."""
@@ -125,25 +129,56 @@ class Runner:
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
+    @property
+    def can_write_now(self) -> bool:
+        """수동 글쓰기를 받을 수 있나: 꺼져 있거나, 자동 등록이 다음 글을 기다리는 중이면 가능."""
+        return not self.running or (self.state == "waiting" and self._manual is None)
+
     def start_batch(self, topic: str | None, count: int, mode: str | None = None) -> bool:
-        """'새 글 쓰기': 주제(없으면 자동) n편. 2편째부터는 안전 간격을 지켜 이어서 쓴다."""
+        """'새 글 쓰기': 주제(없으면 자동) n편. 2편째부터는 안전 간격을 지켜 이어서 쓴다.
+        자동 등록이 기다리는 중이면 그 대기를 깨워 바로 쓰고, 끝나면 다시 자동 대기로 돌아간다."""
+        count = max(1, min(int(count), 3))
         if self.running:
-            return False
+            if not self.can_write_now:
+                return False
+            self._manual = (topic, count, mode)
+            self._wake.set()
+            return True
         self._stop.clear()
         self.ai_problem = ""
-        self.thread = threading.Thread(target=self._batch, args=(topic, max(1, min(int(count), 3)), mode),
-                                       daemon=True)
+        self.thread = threading.Thread(target=self._batch, args=(topic, count, mode), daemon=True)
         self.thread.start()
         return True
 
+    def _sleep(self, seconds: float) -> None:
+        """멈춤·수동 요청이 오면 바로 깨어나는 대기."""
+        self._wake.wait(seconds)
+        self._wake.clear()
+
+    def _take_manual(self) -> bool:
+        """자동 대기 중 들어온 수동 요청을 처리. 처리했으면 True."""
+        req, self._manual = self._manual, None
+        if not req or self._stop.is_set():
+            return False
+        self._run_batch(*req)
+        self.state = "running"
+        return True
+
     def _batch(self, topic, count, mode):
+        try:
+            self._run_batch(topic, count, mode)
+        finally:
+            self.state = "idle"
+
+    def _run_batch(self, topic, count, mode):
         self.state = "running"
         self.finish_mode = mode if mode in ("draft", "publish") else None
         done = 0
         try:
             self.say(f"▶ 새 글 쓰기 {count}편" + (f" · {topic}" if topic else " · 주제는 자동으로"))
             while done < count and not self._stop.is_set():
-                ok, reason, wait = self.gate()
+                # 직접 누른 첫 편은 활동 시간·간격과 상관없이 바로 (하루 한도는 그대로 지킴)
+                ok, reason, wait = self.gate(manual=(done == 0))
                 if not ok:
                     if done == 0 and "한도" in reason:
                         self.say(f"지금은 쓸 수 없어요: {reason}")
@@ -151,20 +186,25 @@ class Runner:
                     at = datetime.now() + timedelta(seconds=wait)
                     self.state = "waiting"
                     self.say(f"{done + 1}번째 글은 {at:%m/%d %H:%M}에 이어서 써요 ({reason})")
-                    self._stop.wait(min(max(wait, 30), 3600))
+                    self._sleep(min(max(wait, 30), 3600))
                     self.state = "running"
                     continue
-                res = self.run_once(topic if done == 0 else None)
+                self._manual_now = done == 0
+                try:
+                    res = self.run_once(topic if done == 0 else None)
+                finally:
+                    self._manual_now = False
                 if res.get("status") == "ai_error" or res.get("status") == "no_topic":
                     break
                 done += 1
         finally:
             self.finish_mode = None
-            self.state = "idle"
             self.say("■ 새 글 쓰기 끝")
 
     def stop(self):
         self._stop.set()
+        self._manual = None
+        self._wake.set()
         self.state = "stopping"
 
     def status(self) -> dict:
@@ -188,9 +228,11 @@ class Runner:
         today = date.today()
         return sum(1 for t in self._attempts() if t.date() == today)
 
-    def gate(self, now: datetime | None = None) -> tuple[bool, str, float]:
-        """지금 올려도 되는지. (가능 여부, 이유, 기다릴 초)"""
+    def gate(self, now: datetime | None = None, manual: bool = False) -> tuple[bool, str, float]:
+        """지금 올려도 되는지. (가능 여부, 이유, 기다릴 초)
+        manual=True: 사용자가 직접 누른 한 편 → 하루 한도만 지키고 간격·활동 시간은 보지 않는다."""
         self.cfg.clamp()
+        manual = manual or self._manual_now
         now = now or datetime.now()
         attempts = self._attempts()
         today = [t for t in attempts if t.date() == now.date()]
@@ -198,6 +240,8 @@ class Runner:
             tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
             start = tomorrow.replace(hour=self.cfg.active_start_hour)
             return False, f"오늘 한도 {self.cfg.daily_limit}개 도달", (start - now).total_seconds()
+        if manual:
+            return True, "", 0
         if attempts:
             gap = self.next_gap_minutes or self.cfg.interval_min_minutes
             ready_at = attempts[-1] + timedelta(minutes=gap)
@@ -207,7 +251,9 @@ class Runner:
             start = now.replace(hour=self.cfg.active_start_hour, minute=0, second=0, microsecond=0)
             if now.hour >= self.cfg.active_end_hour:
                 start += timedelta(days=1)
-            return False, f"활동 시간({self.cfg.active_start_hour}~{self.cfg.active_end_hour}시) 밖", (start - now).total_seconds()
+            when = f"{start:%H:%M}" if start.date() == now.date() else f"내일 {start:%H:%M}"
+            return (False, f"활동 시간({self.cfg.active_start_hour}~{self.cfg.active_end_hour}시) 밖 · {when}에 자동으로 시작해요 "
+                    "(멈춘 게 아니라 기다리는 중)", (start - now).total_seconds())
         return True, "", 0
 
     # ------------------------------------------------------------ 반복
@@ -217,13 +263,18 @@ class Runner:
                  f"{self.cfg.interval_min_minutes}~{self.cfg.interval_max_minutes}분)")
         try:
             while not self._stop.is_set():
+                if self._take_manual():
+                    continue
                 ok, reason, wait = self.gate()
                 if not ok:
+                    if self._last_wait != reason:
+                        self.say(f"대기: {reason}")
+                    self._last_wait = reason
                     self.state = "waiting"
-                    self.say(f"대기: {reason}")
-                    self._stop.wait(min(max(wait, 30), 3600))   # 최대 1시간마다 다시 확인
-                    self.state = "running"
+                    self._sleep(min(max(wait, 30), 3600))   # 최대 1시간마다 다시 확인 (수동 요청 오면 바로)
                     continue
+                self._last_wait = ""
+                self.state = "running"
                 result = self.run_once()
                 if result.get("status") not in COUNTED and not self._stop.is_set():  # ai_error 는 위에서 stop
                     mins = 10 if result.get("status") == "ai_busy" else 30
@@ -237,7 +288,7 @@ class Runner:
                     self.state = "waiting"
                     self.say(f"이번엔 기준을 넘은 주제가 없어 {retry:%H:%M}에 다시 시도해요 (사유: "
                              f"{result.get('reason') or result.get('status')})")
-                    self._stop.wait(mins * 60)     # 쓸 만한 주제가 없으면 30분(AI 혼잡이면 10분) 뒤 다시
+                    self._sleep(mins * 60)     # 쓸 만한 주제가 없으면 30분(AI 혼잡이면 10분) 뒤 다시
                     self.state = "running"
         finally:
             self.state = "idle"

@@ -251,3 +251,40 @@ def test_short_post_gets_expanded(monkeypatch):
     cfg = Config(gemini_api_key="x", keywords=["전기차"], use_google_trends=False, **ALWAYS)
     res = runner_mod.Runner(cfg, say=lambda m: None).run_once()
     assert Short.expanded == 1 and res["status"] == "draft"
+
+
+def test_manual_write_while_auto_waits_outside_hours(monkeypatch):
+    """자동 등록이 밤 시간이라 기다리는 중에도 '한 편 바로 쓰기'는 바로 써져야 한다."""
+    import time as _t
+    import mydaf.naver
+    monkeypatch.setattr(runner_mod.ai, "make_writer", lambda cfg: FakeWriter())
+    monkeypatch.setattr(runner_mod.sources, "collect", fake_collect)
+    monkeypatch.setattr(mydaf.naver, "NaverBlog", FakeBlog)
+    now_h = __import__("datetime").datetime.now().hour
+    hours = dict(active_start_hour=(now_h + 2) % 22, active_end_hour=(now_h + 2) % 22 + 1)
+    cfg = Config(gemini_api_key="x", keywords=["전기차"], use_google_trends=False, publish_mode="draft", **hours)
+    r = runner_mod.Runner(cfg, say=lambda m: None)
+    before = len(FakeBlog.written)
+    r.start()
+    for _ in range(50):
+        if r.state == "waiting":
+            break
+        _t.sleep(0.05)
+    assert r.state == "waiting" and r.can_write_now
+    assert r.start_batch("전기차", 1, "draft")
+    for _ in range(100):
+        if len(FakeBlog.written) > before and r.state == "waiting":
+            break
+        _t.sleep(0.05)
+    assert len(FakeBlog.written) == before + 1 and r.running and r.state == "waiting"
+    r.stop()
+    r.thread.join(timeout=5)
+    assert not r.running
+
+
+def test_manual_gate_keeps_daily_limit():
+    cfg = Config(gemini_api_key="x", active_start_hour=0, active_end_hour=1)
+    r = runner_mod.Runner(cfg, say=lambda m: None)
+    from datetime import datetime
+    ok, _, _ = r.gate(now=datetime.now().replace(hour=23), manual=True)
+    assert ok

@@ -51,3 +51,27 @@ def test_setup_copy_payload(tmp_path):
     assert (dest / "MYDAF.exe").read_text() == "new"
     assert not (dest / "_internal" / "old.dll").exists()
     assert (dest / "_internal" / "a.dll").exists()
+
+
+def test_old_onefile_detection(tmp_path):
+    import setup_mydaf
+    old = tmp_path / "MYDAF.exe"
+    with open(old, "wb") as f:
+        f.truncate(setup_mydaf.ONEFILE_MIN_BYTES + 1)
+    assert setup_mydaf.is_old_onefile(old)
+    (tmp_path / "_internal").mkdir()
+    assert not setup_mydaf.is_old_onefile(old)          # 폴더형(새 버전)은 건드리지 않음
+    small = tmp_path / "x" / "MYDAF.exe"; small.parent.mkdir(); small.write_bytes(b"1")
+    assert not setup_mydaf.is_old_onefile(small)
+
+
+def test_stale_gemini_model_replaced():
+    from mydaf.config import Config
+    assert Config(gemini_model="gemini-flash-latest").gemini_model == "gemini-3.5-flash"
+    assert Config(gemini_model="gemini-2.5-flash").gemini_model == "gemini-3.5-flash"
+    assert Config(gemini_model="gemini-3.5-flash-lite").gemini_model == "gemini-3.5-flash-lite"
+
+
+def test_installed_exe_in_app_subfolder():
+    from mydaf import install
+    assert install.installed_exe().parent.name == "app"

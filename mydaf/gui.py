@@ -19,7 +19,7 @@ from .logs import POST_DIR, read_history
 from .remote import RemoteControl
 from .runner import COUNTED, Runner, display_pct
 
-VERSION = "1.5.9"
+VERSION = "1.6.1"
 
 # ------------------------------------------------------------------ 디자인
 C = {
@@ -1041,7 +1041,7 @@ class App:
     def on_new_post(self):
         if not self._ready():
             return
-        if self.runner.running:
+        if not self.runner.can_write_now:
             messagebox.showinfo("MYDAF", "지금 글을 쓰고 있어요. 끝난 뒤에 다시 눌러 주세요.")
             return
         win = tk.Toplevel(self.root)
@@ -1129,7 +1129,10 @@ class App:
             if left_today <= 0:
                 messagebox.showinfo("MYDAF", f"오늘 한도 {self.cfg.daily_limit}편을 다 썼어요. 내일 다시 해 주세요.")
                 return
-            self.runner.start_batch(t or None, count.get(), mode.get())
+            if not self.runner.start_batch(t or None, count.get(), mode.get()):
+                messagebox.showinfo("MYDAF", "지금 글을 쓰고 있어요. 끝난 뒤에 다시 눌러 주세요.")
+                return
+            self.msgs.put("✎ 수동 글쓰기를 시작해요 (활동 시간·간격과 상관없이 지금 바로, 하루 한도는 지켜요)")
             self.show("home")
 
         Btn(foot, "글쓰기 시작", go, padx=22, pady=9).pack(side="right")

@@ -51,8 +51,20 @@ def create_desktop_shortcut(target: Path, name: str = SHORTCUT_NAME) -> str:
     return out.stdout.strip()
 
 
+def app_install_dir() -> Path:
+    """폴더형 MYDAF 가 들어가는 곳. 예전 한 파일 버전(…\\MYDAF\\MYDAF.exe)이 덮어쓰지 못하게 하위 폴더를 쓴다."""
+    return install_dir() / "app"
+
+
 def installed_exe() -> Path:
-    return install_dir() / "MYDAF.exe"
+    return app_install_dir() / "MYDAF.exe"
+
+
+def running_installed() -> bool:
+    try:
+        return Path(sys.executable).resolve() == installed_exe().resolve()
+    except OSError:
+        return False
 
 
 def strip_mark_of_web(path: Path) -> bool:
@@ -82,7 +94,9 @@ def startup_check(flag_dir: Path) -> dict | None:
     strip_mark_of_web(Path(sys.executable))
     flag = flag_dir / "desktop_shortcut_done"
     try:
-        if not flag.exists():
+        # 설치된 새 버전이면 켤 때마다 바탕화면 아이콘을 자기에게 다시 연결한다
+        # (예전 MYDAF.exe 를 실수로 켜서 아이콘이 옛 버전을 가리키게 돼도 저절로 복구).
+        if running_installed() or not flag.exists():
             flag.write_text(install_and_shortcut(), encoding="utf-8")
     except Exception:
         return None
