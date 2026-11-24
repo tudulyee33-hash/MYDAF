@@ -123,11 +123,11 @@ def test_gemini_unknown_model_picks_available_one(monkeypatch):
     monkeypatch.setattr(ai.requests, "get", lambda url, **kw: R(200, listing))
     monkeypatch.setattr(ai.GeminiWriter, "MIN_GAP_SECONDS", 0)
     from mydaf.config import Config
-    cfg = Config(gemini_api_key="k", gemini_model="gemini-2.5-flash")
+    cfg = Config(gemini_api_key="k", gemini_model="gemini-3.1-flash")
     monkeypatch.setattr(cfg, "save", lambda: None)
     w = ai.make_writer(cfg)
     assert w._json("s", "u", {"type": "object", "properties": {"ok": {"type": "boolean"}}}) == {"ok": True}
-    assert calls == ["gemini-2.5-flash", "gemini-3.8-flash"] and cfg.gemini_model == "gemini-3.8-flash"
+    assert calls == ["gemini-3.1-flash", "gemini-3.8-flash"] and cfg.gemini_model == "gemini-3.8-flash"
 
 
 def test_gemini_model_not_found_anywhere_stops(monkeypatch):

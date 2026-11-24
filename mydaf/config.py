@@ -9,6 +9,10 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 
+STALE_GEMINI_MODELS = {"gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-preview",
+                       "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"}
+
+
 def app_dir() -> Path:
     """설정·로그·브라우저 프로필이 저장되는 폴더 (%APPDATA%\\MYDAF)."""
     override = os.environ.get("MYDAF_HOME")
@@ -126,6 +130,8 @@ class Config:
     def clamp(self) -> None:
         """안전장치: 한도·간격은 고정 기준을 넘지 못하게 맞춘다."""
         self.keywords = split_keywords(self.keywords)
+        if self.gemini_model in STALE_GEMINI_MODELS or "2.5" in self.gemini_model:
+            self.gemini_model = "gemini-3.5-flash"    # 새 키에서 404·한도 오류가 나던 예전 기본값 교체
         self.daily_limit = max(1, min(int(self.daily_limit), HARD_DAILY_MAX))
         self.interval_min_minutes = max(int(self.interval_min_minutes), MIN_INTERVAL_FLOOR)
         self.interval_max_minutes = max(int(self.interval_max_minutes), self.interval_min_minutes)

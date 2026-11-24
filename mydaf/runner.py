@@ -207,7 +207,9 @@ class Runner:
             start = now.replace(hour=self.cfg.active_start_hour, minute=0, second=0, microsecond=0)
             if now.hour >= self.cfg.active_end_hour:
                 start += timedelta(days=1)
-            return False, f"활동 시간({self.cfg.active_start_hour}~{self.cfg.active_end_hour}시) 밖", (start - now).total_seconds()
+            when = f"{start:%H:%M}" if start.date() == now.date() else f"내일 {start:%H:%M}"
+            return (False, f"활동 시간({self.cfg.active_start_hour}~{self.cfg.active_end_hour}시) 밖 · {when}에 자동으로 시작해요 "
+                    "(멈춘 게 아니라 기다리는 중)", (start - now).total_seconds())
         return True, "", 0
 
     # ------------------------------------------------------------ 반복
